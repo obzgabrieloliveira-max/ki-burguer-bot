@@ -44,6 +44,29 @@ const botStats = { sent: 0, failed: 0, received: 0, startedAt: new Date().toISOS
 const processedMessageIds = new Map();
 const MESSAGE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
+const receivedMessages = [];
+const MAX_RECEIVED_MESSAGES = 500;
+
+function storeReceivedMessage(message) {
+  const item = {
+    id: String(message?.id || crypto.randomUUID()),
+    phone: String(message?.from || ""),
+    name: String(message?.contactName || "Cliente"),
+    type: String(message?.type || "unknown"),
+    text: String(message?.text || ""),
+    receivedAt: new Date().toISOString(),
+    read: false
+  };
+
+  receivedMessages.unshift(item);
+
+  if (receivedMessages.length > MAX_RECEIVED_MESSAGES) {
+    receivedMessages.length = MAX_RECEIVED_MESSAGES;
+  }
+
+  return item;
+}
+
 function validateConfiguration() {
   const missing = [];
   if (!API_KEY || API_KEY === "troque-por-uma-senha-forte") missing.push("BOT_API_KEY");
@@ -72,9 +95,11 @@ app.use(cors({
     if (!ALLOWED_ORIGIN || !origin || origin === ALLOWED_ORIGIN) return callback(null, true);
     return callback(new Error("Origem não autorizada pelo CORS."));
   },
-  methods: ["GET", "POST"],
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "x-api-key"]
 }));
+
+app.options("*", cors());
 
 function requireApiKey(req, res, next) {
   if (String(req.get("x-api-key") || "") !== API_KEY) {
@@ -540,6 +565,48 @@ app.post("/broadcast", requireApiKey, async (req, res) => {
   return res.json({ ok: true, total: recipients.length, sent, failed, errors: errors.slice(0, 20) });
 });
 
+app.get("/messages", requireApiKey, (req, res) => {
+  const limit = Math.min(500, Math.max(1, Number(req.query?.limit) || 200));
+  const unread = receivedMessages.filter(message => !message.read).length;
+
+  return res.json({
+    ok: true,
+    total: receivedMessages.length,
+    unread,
+    messages: receivedMessages.slice(0, limit)
+  });
+});
+
+app.post("/messages/:id/read", requireApiKey, (req, res) => {
+  const message = receivedMessages.find(item => item.id === String(req.params.id));
+
+  if (!message) {
+    return res.status(404).json({
+      ok: false,
+      error: "Mensagem não encontrada."
+    });
+  }
+
+  message.read = true;
+  return res.json({ ok: true, message });
+});
+
+app.post("/messages/read-all", requireApiKey, (_req, res) => {
+  receivedMessages.forEach(message => {
+    message.read = true;
+  });
+
+  return res.json({ ok: true });
+});
+
+app.delete("/messages", requireApiKey, (_req, res) => {
+  receivedMessages.length = 0;
+  return res.json({
+    ok: true,
+    message: "Conversas apagadas com sucesso."
+  });
+});
+
 app.post("/shutdown", requireApiKey, (req, res) => {
   if (!ALLOW_REMOTE_SHUTDOWN) {
     return res.status(403).json({
@@ -578,6 +645,7 @@ app.post("/webhook", (req, res) => {
       try {
         if (!message.id || !message.from || isDuplicateMessage(message.id)) return;
         botStats.received += 1;
+        storeReceivedMessage(message);
 
         console.log(
           `Mensagem recebida de ${message.contactName || message.from}:`,
