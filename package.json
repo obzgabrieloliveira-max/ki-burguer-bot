@@ -1,0 +1,16 @@
+{
+  "name": "bot-whatsapp-ki-burguer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot local da Ki-Burguer para envio de mensagens pelo WhatsApp Web",
+  "main": "server.js",
+  "scripts": {"start": "node server.js"},
+  "engines": {"node": ">=18"},
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.34.7"
+  }
+}

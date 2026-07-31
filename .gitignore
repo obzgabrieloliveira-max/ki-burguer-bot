@@ -1,0 +1,5 @@
+.env
+node_modules/
+*.zip
+funcional/
+KiBurguer-Dashboard-Bot-Integrado/
