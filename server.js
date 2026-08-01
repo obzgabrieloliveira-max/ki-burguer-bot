@@ -65,6 +65,9 @@ function storeReceivedMessage(message) {
     name: String(message?.contactName || "Cliente"),
     type: String(message?.type || "unknown"),
     text: String(message?.text || ""),
+    mediaId: String(message?.mediaId || ""),
+    mimeType: String(message?.mimeType || ""),
+    voice: Boolean(message?.voice),
     receivedAt: new Date().toISOString(),
     read: false
   };
@@ -214,6 +217,58 @@ async function metaRequest(path, body) {
   }
 
   return data;
+}
+
+async function getMetaMediaMetadata(mediaId) {
+  const response = await fetch(
+    `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
+    {
+      headers: {
+        Authorization: `Bearer ${META_ACCESS_TOKEN}`
+      }
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || !data?.url) {
+    const detail =
+      data?.error?.error_user_msg ||
+      data?.error?.message ||
+      `Não foi possível localizar a mídia na Meta (${response.status}).`;
+    const error = new Error(detail);
+    error.status = response.status;
+    error.meta = data;
+    throw error;
+  }
+
+  return data;
+}
+
+async function downloadMetaMedia(mediaId) {
+  const metadata = await getMetaMediaMetadata(mediaId);
+
+  const response = await fetch(metadata.url, {
+    headers: {
+      Authorization: `Bearer ${META_ACCESS_TOKEN}`
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Não foi possível baixar o áudio da Meta (${response.status}).`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length) throw new Error("O áudio retornado pela Meta está vazio.");
+
+  return {
+    buffer,
+    contentType: String(
+      response.headers.get("content-type") ||
+      metadata?.mime_type ||
+      "audio/ogg"
+    ).split(";")[0].trim()
+  };
 }
 
 async function sendTextMessage(phone, message, replyToMessageId = null) {
@@ -531,12 +586,23 @@ function extractIncomingMessages(body) {
           "";
         const buttonText = message?.button?.text || message?.button?.payload || "";
 
+        const media =
+          message?.audio ||
+          message?.voice ||
+          message?.document ||
+          message?.image ||
+          message?.video ||
+          null;
+
         results.push({
           id: message?.id,
           from: message?.from,
           type: message?.type,
           text: message?.text?.body || interactiveText || buttonText || "",
-          contactName
+          contactName,
+          mediaId: media?.id || "",
+          mimeType: media?.mime_type || "",
+          voice: Boolean(message?.audio?.voice)
         });
       }
     }
@@ -813,6 +879,47 @@ app.get("/messages", requireApiKey, (req, res) => {
     unread,
     messages: receivedMessages.slice(0, limit)
   });
+});
+
+app.get("/messages/:id/media", requireApiKey, async (req, res) => {
+  try {
+    const message = receivedMessages.find(
+      item => item.id === String(req.params.id)
+    );
+
+    if (!message) {
+      return res.status(404).json({
+        ok: false,
+        error: "Mensagem não encontrada."
+      });
+    }
+
+    if (message.type !== "audio" || !message.mediaId) {
+      return res.status(400).json({
+        ok: false,
+        error: "Esta mensagem não possui um áudio disponível."
+      });
+    }
+
+    const media = await downloadMetaMedia(message.mediaId);
+
+    res.set({
+      "Content-Type": media.contentType || message.mimeType || "audio/ogg",
+      "Content-Length": String(media.buffer.length),
+      "Cache-Control": "private, max-age=300",
+      "Content-Disposition": 'inline; filename="audio-whatsapp.ogg"',
+      "Accept-Ranges": "bytes",
+      "X-Content-Type-Options": "nosniff"
+    });
+
+    return res.status(200).send(media.buffer);
+  } catch (error) {
+    console.error("Erro ao carregar áudio do WhatsApp:", error.meta || error);
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message || "Não foi possível carregar o áudio."
+    });
+  }
 });
 
 app.post("/messages/:id/read", requireApiKey, (req, res) => {
