@@ -107,7 +107,9 @@ const allowedOrigins = new Set([
 
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin) return callback(null, true);
+    if (!origin || origin === "null") {
+  return callback(null, true);
+}
 
     const normalizedOrigin = String(origin).trim().replace(/\/$/, "");
     const isAllowed =
