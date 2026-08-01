@@ -26,15 +26,11 @@ const TEMPLATE_NAMES = {
   pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
 
-const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
-const HEADER_IMAGE_SOURCE_URL = String(
-  process.env.HEADER_IMAGE_SOURCE_URL || "https://ki-pedidos.netlify.app/logo-ki.jpg"
-).trim();
-
-let cachedHeaderImage = null;
-let cachedHeaderImageType = "image/jpeg";
-let cachedHeaderImageAt = 0;
-const HEADER_IMAGE_CACHE_MS = 6 * 60 * 60 * 1000;
+const TEMPLATE_HEADER_IMAGES = {
+  novo_site: String(process.env.HEADER_IMAGE_NOVO_SITE || process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim(),
+  pedido_pix: String(process.env.HEADER_IMAGE_PEDIDO_PIX || process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim(),
+  pedido_cancelado: String(process.env.HEADER_IMAGE_PEDIDO_CANCELADO || process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim()
+};
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
   process.env.HUMAN_SUPPORT_BUTTON_TEXT || "Falar com Atendente"
 ).trim().toLowerCase();
@@ -46,18 +42,8 @@ const HUMAN_SUPPORT_REPLY = String(
 const SITE_URL = String(process.env.SITE_URL || "https://ki-pedidos.netlify.app/").trim();
 const AUTO_REPLY_MESSAGE = String(
   process.env.AUTO_REPLY_MESSAGE ||
-`🍔 *Bem-vindo(a) à Ki-Burguer!* 😋
-
-É um prazer ter você por aqui!
-
-📲 Confira nosso cardápio completo:
-${SITE_URL}
-
-🚀 Faça seu pedido em poucos cliques.
-
-💬 Se precisar de ajuda, é só responder esta conversa.`
-).replace(/\n/g, "
-").trim();
+  `Olá! 🍔 Bem-vindo à Ki-Burguer.\n\nConfira nosso cardápio e faça seu pedido:\n${SITE_URL}`
+).replace(/\\n/g, "\n").trim();
 
 let botEnabled = String(process.env.BOT_ENABLED || "true").toLowerCase() !== "false";
 const ALLOW_REMOTE_SHUTDOWN = String(process.env.ALLOW_REMOTE_SHUTDOWN || "false").toLowerCase() === "true";
@@ -126,8 +112,8 @@ const allowedOrigins = new Set([
 const corsOptions = {
   origin(origin, callback) {
     if (!origin || origin === "null") {
-  return callback(null, true);
-}
+      return callback(null, true);
+    }
 
     const normalizedOrigin = String(origin).trim().replace(/\/$/, "");
     const isAllowed =
@@ -245,18 +231,19 @@ function templateTextParameter(value) {
   return { type: "text", text };
 }
 
-async function sendTemplateMessage(phone, templateName, parameters = []) {
+async function sendTemplateMessage(phone, templateName, parameters = [], options = {}) {
   if (!templateName) throw new Error("Nome do modelo de mensagem não configurado.");
 
   const components = [];
+  const headerImageUrl = String(options.headerImageUrl || "").trim();
 
-  if (TEMPLATE_HEADER_IMAGE_URL) {
+  if (headerImageUrl) {
     components.push({
       type: "header",
       parameters: [
         {
           type: "image",
-          image: { link: TEMPLATE_HEADER_IMAGE_URL }
+          image: { link: headerImageUrl }
         }
       ]
     });
@@ -269,16 +256,19 @@ async function sendTemplateMessage(phone, templateName, parameters = []) {
     });
   }
 
+  const template = {
+    name: templateName,
+    language: { code: TEMPLATE_LANGUAGE }
+  };
+
+  if (components.length) template.components = components;
+
   const payload = {
     messaging_product: "whatsapp",
     recipient_type: "individual",
     to: normalizeBrazilianPhone(phone),
     type: "template",
-    template: {
-      name: templateName,
-      language: { code: TEMPLATE_LANGUAGE },
-      components
-    }
+    template
   };
 
   return metaRequest(`${META_PHONE_NUMBER_ID}/messages`, payload);
@@ -357,11 +347,13 @@ function templateForOrderStatus(order, status) {
   const mappings = {
     aguardando_comprovante: {
       name: TEMPLATE_NAMES.pedido_pix,
-      parameters: [name, number]
+      parameters: [name, number],
+      headerImageUrl: TEMPLATE_HEADER_IMAGES.pedido_pix
     },
     pix_pendente: {
       name: TEMPLATE_NAMES.pedido_pix,
-      parameters: [name, number]
+      parameters: [name, number],
+      headerImageUrl: TEMPLATE_HEADER_IMAGES.pedido_pix
     },
     novo: {
       name: TEMPLATE_NAMES.pedido_em_preparo,
@@ -397,7 +389,8 @@ function templateForOrderStatus(order, status) {
     },
     cancelado: {
       name: TEMPLATE_NAMES.pedido_cancelado,
-      parameters: [name, number]
+      parameters: [name, number],
+      headerImageUrl: TEMPLATE_HEADER_IMAGES.pedido_cancelado
     }
   };
 
@@ -412,7 +405,7 @@ async function sendOrderTemplate(order, status) {
   if (!phone) throw new Error("O pedido não possui telefone.");
 
   const selected = templateForOrderStatus(order, status);
-  const result = await sendTemplateMessage(phone, selected.name, selected.parameters);
+  const result = await sendTemplateMessage(phone, selected.name, selected.parameters, { headerImageUrl: selected.headerImageUrl });
 
   return {
     result,
@@ -480,54 +473,6 @@ function isHumanSupportRequest(message) {
     text.includes("quero falar com um atendente");
 }
 
-app.get("/meta-header.jpg", async (_req, res) => {
-  try {
-    const now = Date.now();
-
-    if (!cachedHeaderImage || now - cachedHeaderImageAt > HEADER_IMAGE_CACHE_MS) {
-      const response = await fetch(HEADER_IMAGE_SOURCE_URL, {
-        headers: {
-          "User-Agent": "Ki-Burguer-Meta-Image-Proxy/1.0",
-          "Accept": "image/jpeg,image/png,image/*"
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Não foi possível carregar a imagem (${response.status}).`);
-      }
-
-      const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim();
-      if (!contentType.startsWith("image/")) {
-        throw new Error(`A origem não retornou uma imagem válida: ${contentType || "sem content-type"}.`);
-      }
-
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (!buffer.length) throw new Error("A imagem retornada está vazia.");
-
-      cachedHeaderImage = buffer;
-      cachedHeaderImageType = contentType;
-      cachedHeaderImageAt = now;
-      console.log(`Imagem do cabeçalho atualizada no cache (${buffer.length} bytes).`);
-    }
-
-    res.set({
-      "Content-Type": cachedHeaderImageType,
-      "Content-Length": String(cachedHeaderImage.length),
-      "Cache-Control": "public, max-age=21600, immutable",
-      "Content-Disposition": 'inline; filename="meta-header.jpg"',
-      "X-Content-Type-Options": "nosniff"
-    });
-
-    return res.status(200).send(cachedHeaderImage);
-  } catch (error) {
-    console.error("Erro ao servir imagem do cabeçalho:", error);
-    return res.status(502).json({
-      ok: false,
-      error: error.message || "Erro ao carregar a imagem do cabeçalho."
-    });
-  }
-});
-
 app.get("/", (_req, res) => {
   res.json({
     ok: true,
@@ -580,7 +525,7 @@ app.post("/send-new-site", requireApiKey, async (req, res) => {
       : [name];
 
     const result = await trackedSend(() =>
-      sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters)
+      sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters, { headerImageUrl: TEMPLATE_HEADER_IMAGES.novo_site })
     );
 
     return res.json({
@@ -594,6 +539,85 @@ app.post("/send-new-site", requireApiKey, async (req, res) => {
     return res.status(error.status || 500).json({
       ok: false,
       error: error.message || "Erro ao enviar o modelo do novo site.",
+      details: error.meta || undefined
+    });
+  }
+});
+
+app.post("/test-template", requireApiKey, async (req, res) => {
+  try {
+    if (!botEnabled) {
+      return res.status(409).json({ ok: false, error: "A automação está desligada." });
+    }
+
+    const phone = normalizeBrazilianPhone(req.body?.phone);
+    const templateKey = String(req.body?.template || "").trim();
+    const parameters = Array.isArray(req.body?.parameters) ? req.body.parameters : [];
+
+    const available = {
+      novo_site_kiburguer: {
+        name: TEMPLATE_NAMES.novo_site,
+        expectedParameters: 1,
+        headerImageUrl: TEMPLATE_HEADER_IMAGES.novo_site
+      },
+      pedido_pix1: {
+        name: TEMPLATE_NAMES.pedido_pix,
+        expectedParameters: 2,
+        headerImageUrl: TEMPLATE_HEADER_IMAGES.pedido_pix
+      },
+      pedido_em_preparo: {
+        name: TEMPLATE_NAMES.pedido_em_preparo,
+        expectedParameters: 2
+      },
+      pedido_status1: {
+        name: TEMPLATE_NAMES.pedido_status,
+        expectedParameters: 3
+      },
+      pedido_entregue: {
+        name: TEMPLATE_NAMES.pedido_entregue,
+        expectedParameters: 2
+      },
+      pedido_cancelado1: {
+        name: TEMPLATE_NAMES.pedido_cancelado,
+        expectedParameters: 2,
+        headerImageUrl: TEMPLATE_HEADER_IMAGES.pedido_cancelado
+      }
+    };
+
+    const selected = available[templateKey];
+    if (!selected) {
+      return res.status(400).json({
+        ok: false,
+        error: "Modelo inválido.",
+        available: Object.keys(available)
+      });
+    }
+
+    if (parameters.length !== selected.expectedParameters) {
+      return res.status(400).json({
+        ok: false,
+        error: `O modelo ${templateKey} exige ${selected.expectedParameters} parâmetro(s).`,
+        expectedParameters: selected.expectedParameters
+      });
+    }
+
+    const result = await trackedSend(() =>
+      sendTemplateMessage(phone, selected.name, parameters, {
+        headerImageUrl: selected.headerImageUrl
+      })
+    );
+
+    return res.json({
+      ok: true,
+      phone,
+      template: selected.name,
+      messageId: result?.messages?.[0]?.id || null
+    });
+  } catch (error) {
+    console.error("Erro ao testar modelo:", error.meta || error);
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message || "Erro ao testar o modelo.",
       details: error.meta || undefined
     });
   }
@@ -825,19 +849,8 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        if (message.type !== "text") return;
-
-        const alreadyWelcomed = receivedMessages.some(
-          item => item.phone === message.from && item.id !== message.id
-        );
-
-        if (alreadyWelcomed) return;
-
-        await trackedSend(() =>
-          sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
-        );
-
-        console.log(`Mensagem de boas-vindas enviada para ${message.from}.`);
+        await trackedSend(() => sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
+        console.log(`Resposta automática enviada para ${message.from}.`);
       } catch (error) {
         console.error("Erro ao processar mensagem recebida:", error.meta || error);
       }
@@ -858,5 +871,11 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Webhook: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Graph API: ${GRAPH_API_VERSION}`);
-  console.log(`Imagem pública do cabeçalho: /meta-header.jpg`);
+  console.log("Templates:");
+  console.log(`- Novo site: ${TEMPLATE_NAMES.novo_site}`);
+  console.log(`- PIX: ${TEMPLATE_NAMES.pedido_pix}`);
+  console.log(`- Em preparo: ${TEMPLATE_NAMES.pedido_em_preparo}`);
+  console.log(`- Status: ${TEMPLATE_NAMES.pedido_status}`);
+  console.log(`- Entregue: ${TEMPLATE_NAMES.pedido_entregue}`);
+  console.log(`- Cancelado: ${TEMPLATE_NAMES.pedido_cancelado}`);
 });
