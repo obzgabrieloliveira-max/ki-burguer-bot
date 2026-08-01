@@ -287,7 +287,23 @@ async function sendTemplateMessage(phone, templateName, parameters = []) {
     }
   };
 
-  return metaRequest(`${META_PHONE_NUMBER_ID}/messages`, payload);
+  console.log("Enviando template para a Meta:", {
+    phone: normalizeBrazilianPhone(phone),
+    template: templateName,
+    language: TEMPLATE_LANGUAGE,
+    parameters
+  });
+
+  const result = await metaRequest(`${META_PHONE_NUMBER_ID}/messages`, payload);
+
+  console.log("Meta aceitou o template:", {
+    phone: normalizeBrazilianPhone(phone),
+    template: templateName,
+    messageId: result?.messages?.[0]?.id || null,
+    response: result
+  });
+
+  return result;
 }
 
 function orderName(order) {
@@ -449,6 +465,55 @@ function isDuplicateMessage(messageId) {
   if (processedMessageIds.has(messageId)) return true;
   processedMessageIds.set(messageId, now);
   return false;
+}
+
+function extractMessageStatuses(body) {
+  const results = [];
+
+  for (const entry of body?.entry || []) {
+    for (const change of entry?.changes || []) {
+      if (change?.field !== "messages") continue;
+
+      const value = change?.value || {};
+
+      for (const status of value?.statuses || []) {
+        results.push({
+          id: status?.id || null,
+          recipientId: status?.recipient_id || null,
+          status: status?.status || "unknown",
+          timestamp: status?.timestamp || null,
+          conversation: status?.conversation || null,
+          pricing: status?.pricing || null,
+          errors: Array.isArray(status?.errors) ? status.errors : []
+        });
+      }
+    }
+  }
+
+  return results;
+}
+
+function logMessageStatuses(body) {
+  const statuses = extractMessageStatuses(body);
+
+  for (const item of statuses) {
+    const details = {
+      messageId: item.id,
+      recipient: item.recipientId,
+      status: item.status,
+      conversation: item.conversation,
+      pricing: item.pricing
+    };
+
+    if (item.status === "failed" || item.errors.length) {
+      console.error("FALHA NA ENTREGA DA META:", {
+        ...details,
+        errors: item.errors
+      });
+    } else {
+      console.log(`STATUS META: ${item.status}`, details);
+    }
+  }
 }
 
 function extractIncomingMessages(body) {
@@ -810,6 +875,8 @@ app.post("/webhook", (req, res) => {
 
   res.sendStatus(200);
   if (req.body?.object !== "whatsapp_business_account") return;
+
+  logMessageStatuses(req.body);
 
   const messages = extractIncomingMessages(req.body);
 
