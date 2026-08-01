@@ -455,6 +455,28 @@ function extractIncomingMessages(body) {
   return results;
 }
 
+function extractMessageStatuses(body) {
+  const statuses = [];
+
+  for (const entry of body?.entry || []) {
+    for (const change of entry?.changes || []) {
+      if (change?.field !== "messages") continue;
+
+      for (const status of change?.value?.statuses || []) {
+        statuses.push({
+          id: status?.id || null,
+          recipientId: status?.recipient_id || null,
+          status: status?.status || "unknown",
+          timestamp: status?.timestamp || null,
+          errors: Array.isArray(status?.errors) ? status.errors : []
+        });
+      }
+    }
+  }
+
+  return statuses;
+}
+
 function isHumanSupportRequest(message) {
   const text = String(message?.text || "").trim().toLowerCase();
   return text === HUMAN_SUPPORT_BUTTON_TEXT.toLowerCase() ||
@@ -736,6 +758,22 @@ app.post("/webhook", (req, res) => {
   res.sendStatus(200);
   if (req.body?.object !== "whatsapp_business_account") return;
 
+  const statuses = extractMessageStatuses(req.body);
+
+  for (const delivery of statuses) {
+    if (delivery.status === "failed") {
+      console.error("FALHA NA ENTREGA DA META:", {
+        messageId: delivery.id,
+        recipient: delivery.recipientId,
+        errors: delivery.errors
+      });
+    } else {
+      console.log(
+        `STATUS META: ${delivery.status} | mensagem ${delivery.id || "-"} | destinatário ${delivery.recipientId || "-"}`
+      );
+    }
+  }
+
   const messages = extractIncomingMessages(req.body);
 
   for (const message of messages) {
@@ -761,7 +799,7 @@ app.post("/webhook", (req, res) => {
 
         const customerName = String(message.contactName || "Cliente").trim() || "Cliente";
 
-        await trackedSend(() =>
+        const templateResult = await trackedSend(() =>
           sendTemplateMessage(
             message.from,
             TEMPLATE_NAMES.novo_site,
@@ -770,7 +808,8 @@ app.post("/webhook", (req, res) => {
         );
 
         console.log(
-          `Resposta inicial enviada com o modelo ${TEMPLATE_NAMES.novo_site} para ${message.from}.`
+          `Modelo ${TEMPLATE_NAMES.novo_site} aceito pela Meta para ${message.from}; ` +
+          `message_id=${templateResult?.messages?.[0]?.id || "não retornado"}; aguardando status de entrega.`
         );
       } catch (error) {
         console.error("Erro ao processar mensagem recebida:", error.meta || error);
