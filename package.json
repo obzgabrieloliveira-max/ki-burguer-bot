@@ -1,8 +1,8 @@
 {
   "name": "bot-whatsapp-ki-burguer",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "Bot Ki-Burguer com Meta WhatsApp Cloud API, templates e caixa de respostas",
+  "description": "Ki-Burguer: Meta WhatsApp Cloud API, templates aprovados, respostas e dashboard",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
