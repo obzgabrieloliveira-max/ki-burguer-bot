@@ -122,8 +122,7 @@ const corsOptions = {
     const normalizedOrigin = String(origin).trim().replace(/\/$/, "");
     const isAllowed =
       allowedOrigins.has(normalizedOrigin) ||
-      /^https:\/\/[a-z0-9-]+(?:--[a-z0-9-]+)?\.netlify\.app$/i.test(normalizedOrigin) ||
-      /^https:\/\/web-sandbox\.oaiusercontent\.com$/i.test(normalizedOrigin);
+      /^https:\/\/[a-z0-9-]+(?:--[a-z0-9-]+)?\.netlify\.app$/i.test(normalizedOrigin);
 
     if (isAllowed) return callback(null, true);
 
@@ -236,12 +235,28 @@ function templateTextParameter(value) {
   return { type: "text", text };
 }
 
+function templateUsesImageHeader(templateName) {
+  const normalized = String(templateName || "").trim();
+
+  return new Set([
+    TEMPLATE_NAMES.novo_site,
+    TEMPLATE_NAMES.pedido_pix,
+    TEMPLATE_NAMES.pedido_cancelado
+  ]).has(normalized);
+}
+
 async function sendTemplateMessage(phone, templateName, parameters = []) {
   if (!templateName) throw new Error("Nome do modelo de mensagem não configurado.");
 
   const components = [];
 
-  if (TEMPLATE_HEADER_IMAGE_URL) {
+  if (templateUsesImageHeader(templateName)) {
+    if (!TEMPLATE_HEADER_IMAGE_URL) {
+      throw new Error(
+        `O modelo ${templateName} exige imagem no cabeçalho. Configure META_TEMPLATE_HEADER_IMAGE_URL.`
+      );
+    }
+
     components.push({
       type: "header",
       parameters: [
@@ -842,4 +857,14 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Graph API: ${GRAPH_API_VERSION}`);
   console.log(`Imagem pública do cabeçalho: /meta-header.jpg`);
+  console.log(`Templates com imagem: ${[
+    TEMPLATE_NAMES.novo_site,
+    TEMPLATE_NAMES.pedido_pix,
+    TEMPLATE_NAMES.pedido_cancelado
+  ].join(", ")}`);
+  console.log(`Templates sem imagem: ${[
+    TEMPLATE_NAMES.pedido_em_preparo,
+    TEMPLATE_NAMES.pedido_status,
+    TEMPLATE_NAMES.pedido_entregue
+  ].join(", ")}`);
 });
