@@ -606,6 +606,9 @@ app.post("/send-new-site", requireApiKey, async (req, res) => {
 });
 
 app.post("/order-created", requireApiKey, async (req, res) => {
+  console.log("======== NOVO PEDIDO ========");
+  console.log(JSON.stringify(req.body, null, 2));
+  console.log("=============================");
   try {
     if (!botEnabled) {
       return res.status(409).json({ ok: false, error: "A automação está desligada." });
