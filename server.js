@@ -46,7 +46,7 @@ const HUMAN_SUPPORT_REPLY = String(
 const SITE_URL = String(process.env.SITE_URL || "https://ki-pedidos.netlify.app/").trim();
 const AUTO_REPLY_MESSAGE = String(
   process.env.AUTO_REPLY_MESSAGE ||
-  `Olá! 🍔 Bem-vindo à Ki-Burguer.\n\nConfira nosso cardápio e faça seu pedido:\n${SITE_URL}`
+  `Olá! 🍔 Seja bem-vindo(a) à Ki-Burguer!\n\nAqui você encontra seus lanches favoritos preparados com muito sabor. 😋\n\n📲 Confira o cardápio e faça seu pedido:\n${SITE_URL}\n\nSe precisar de ajuda, é só responder por aqui.`
 ).replace(/\\n/g, "\n").trim();
 
 let botEnabled = String(process.env.BOT_ENABLED || "true").toLowerCase() !== "false";
@@ -815,20 +815,11 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        const customerName = String(message.contactName || "Cliente").trim() || "Cliente";
-
-        const templateResult = await trackedSend(() =>
-          sendTemplateMessage(
-            message.from,
-            TEMPLATE_NAMES.novo_site,
-            [customerName]
-          )
+        await trackedSend(() =>
+          sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
         );
 
-        console.log(
-          `Resposta inicial enviada com o modelo ${TEMPLATE_NAMES.novo_site} para ${message.from}; ` +
-          `message_id=${templateResult?.messages?.[0]?.id || "não retornado"}.`
-        );
+        console.log(`Resposta automática de boas-vindas enviada para ${message.from}.`);
       } catch (error) {
         console.error("Erro ao processar mensagem recebida:", error.meta || error);
       }
