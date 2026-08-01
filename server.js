@@ -18,9 +18,12 @@ const GRAPH_API_VERSION = String(process.env.GRAPH_API_VERSION || "v26.0").trim(
 const TEMPLATE_LANGUAGE = String(process.env.META_TEMPLATE_LANGUAGE || "pt_BR").trim();
 
 const TEMPLATE_NAMES = {
-  pedido_pix: String(process.env.TEMPLATE_PEDIDO_PIX || "pedido_pix").trim(),
-  pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status").trim(),
-  pedido_cancelado: String(process.env.TEMPLATE_PEDIDO_CANCELADO || "pedido_cancelado").trim()
+  novo_site: String(process.env.TEMPLATE_NOVO_SITE || "novo_site_kiburguer").trim(),
+  pedido_cancelado: String(process.env.TEMPLATE_PEDIDO_CANCELADO || "pedido_cancelado1").trim(),
+  pedido_pix: String(process.env.TEMPLATE_PEDIDO_PIX || "pedido_pix1").trim(),
+  pedido_em_preparo: String(process.env.TEMPLATE_PEDIDO_EM_PREPARO || "pedido_em_preparo").trim(),
+  pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status1").trim(),
+  pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
 
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
@@ -73,7 +76,6 @@ function validateConfiguration() {
   if (!META_ACCESS_TOKEN) missing.push("META_ACCESS_TOKEN");
   if (!META_PHONE_NUMBER_ID) missing.push("META_PHONE_NUMBER_ID");
   if (!META_VERIFY_TOKEN) missing.push("META_VERIFY_TOKEN");
-  if (!TEMPLATE_HEADER_IMAGE_URL) missing.push("META_TEMPLATE_HEADER_IMAGE_URL");
 
   if (missing.length) {
     console.error(`\nERRO: configure no arquivo .env: ${missing.join(", ")}\n`);
@@ -90,16 +92,40 @@ app.use(express.json({
   }
 }));
 
-app.use(cors({
+const configuredOrigins = ALLOWED_ORIGIN
+  .split(",")
+  .map(value => value.trim().replace(/\/$/, ""))
+  .filter(Boolean);
+
+const allowedOrigins = new Set([
+  "https://ki-pedidos.netlify.app",
+  "https://ki-cardapio.netlify.app",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  ...configuredOrigins
+]);
+
+const corsOptions = {
   origin(origin, callback) {
-    if (!ALLOWED_ORIGIN || !origin || origin === ALLOWED_ORIGIN) return callback(null, true);
-    return callback(new Error("Origem não autorizada pelo CORS."));
+    if (!origin) return callback(null, true);
+
+    const normalizedOrigin = String(origin).trim().replace(/\/$/, "");
+    const isAllowed =
+      allowedOrigins.has(normalizedOrigin) ||
+      /^https:\/\/[a-z0-9-]+(?:--[a-z0-9-]+)?\.netlify\.app$/i.test(normalizedOrigin);
+
+    if (isAllowed) return callback(null, true);
+
+    console.warn(`CORS bloqueou: ${normalizedOrigin}`);
+    return callback(new Error(`Origem não autorizada pelo CORS: ${normalizedOrigin}`));
   },
   methods: ["GET", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "x-api-key"]
-}));
+  allowedHeaders: ["Content-Type", "x-api-key"],
+  optionsSuccessStatus: 204
+};
 
-app.options("*", cors());
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 function requireApiKey(req, res, next) {
   if (String(req.get("x-api-key") || "") !== API_KEY) {
@@ -202,8 +228,10 @@ function templateTextParameter(value) {
 async function sendTemplateMessage(phone, templateName, parameters = []) {
   if (!templateName) throw new Error("Nome do modelo de mensagem não configurado.");
 
-  const components = [
-    {
+  const components = [];
+
+  if (TEMPLATE_HEADER_IMAGE_URL) {
+    components.push({
       type: "header",
       parameters: [
         {
@@ -211,12 +239,15 @@ async function sendTemplateMessage(phone, templateName, parameters = []) {
           image: { link: TEMPLATE_HEADER_IMAGE_URL }
         }
       ]
-    },
-    {
+    });
+  }
+
+  if (parameters.length) {
+    components.push({
       type: "body",
       parameters: parameters.map(templateTextParameter)
-    }
-  ];
+    });
+  }
 
   const payload = {
     messaging_product: "whatsapp",
@@ -303,21 +334,54 @@ function templateForOrderStatus(order, status) {
   const name = orderName(order);
   const number = orderNumber(order);
 
-  if (normalized === "aguardando_comprovante") {
-    return {
+  const mappings = {
+    aguardando_comprovante: {
       name: TEMPLATE_NAMES.pedido_pix,
       parameters: [name, number]
-    };
-  }
-
-  if (normalized === "cancelado") {
-    return {
+    },
+    pix_pendente: {
+      name: TEMPLATE_NAMES.pedido_pix,
+      parameters: [name, number]
+    },
+    novo: {
+      name: TEMPLATE_NAMES.pedido_em_preparo,
+      parameters: [name, number]
+    },
+    recebido: {
+      name: TEMPLATE_NAMES.pedido_em_preparo,
+      parameters: [name, number]
+    },
+    pedido_recebido: {
+      name: TEMPLATE_NAMES.pedido_em_preparo,
+      parameters: [name, number]
+    },
+    confirmado: {
+      name: TEMPLATE_NAMES.pedido_em_preparo,
+      parameters: [name, number]
+    },
+    preparo: {
+      name: TEMPLATE_NAMES.pedido_em_preparo,
+      parameters: [name, number]
+    },
+    em_preparo: {
+      name: TEMPLATE_NAMES.pedido_em_preparo,
+      parameters: [name, number]
+    },
+    entregue: {
+      name: TEMPLATE_NAMES.pedido_entregue,
+      parameters: [name, number]
+    },
+    concluido: {
+      name: TEMPLATE_NAMES.pedido_entregue,
+      parameters: [name, number]
+    },
+    cancelado: {
       name: TEMPLATE_NAMES.pedido_cancelado,
       parameters: [name, number]
-    };
-  }
+    }
+  };
 
-  return {
+  return mappings[normalized] || {
     name: TEMPLATE_NAMES.pedido_status,
     parameters: [name, number, statusLabel(status)]
   };
@@ -434,6 +498,38 @@ app.post("/toggle", requireApiKey, (req, res) => {
   });
 });
 
+
+app.post("/send-new-site", requireApiKey, async (req, res) => {
+  try {
+    if (!botEnabled) {
+      return res.status(409).json({ ok: false, error: "A automação está desligada." });
+    }
+
+    const phone = normalizeBrazilianPhone(req.body?.phone);
+    const name = String(req.body?.name || req.body?.nome || "Cliente").trim() || "Cliente";
+    const parameters = Array.isArray(req.body?.parameters)
+      ? req.body.parameters
+      : [name];
+
+    const result = await trackedSend(() =>
+      sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters)
+    );
+
+    return res.json({
+      ok: true,
+      phone,
+      template: TEMPLATE_NAMES.novo_site,
+      messageId: result?.messages?.[0]?.id || null
+    });
+  } catch (error) {
+    console.error("Erro ao enviar modelo do novo site:", error.meta || error);
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message || "Erro ao enviar o modelo do novo site.",
+      details: error.meta || undefined
+    });
+  }
+});
 
 app.post("/order-created", requireApiKey, async (req, res) => {
   try {
