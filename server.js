@@ -765,8 +765,7 @@ app.post("/webhook", (req, res) => {
           sendTemplateMessage(
             message.from,
             TEMPLATE_NAMES.novo_site,
-            [customerName],
-            { headerImageUrl: TEMPLATE_HEADER_IMAGES.novo_site }
+            [customerName]
           )
         );
 
