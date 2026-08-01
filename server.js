@@ -815,8 +815,20 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        await trackedSend(() => sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
-        console.log(`Resposta automática enviada para ${message.from}.`);
+        const customerName = String(message.contactName || "Cliente").trim() || "Cliente";
+
+        const templateResult = await trackedSend(() =>
+          sendTemplateMessage(
+            message.from,
+            TEMPLATE_NAMES.novo_site,
+            [customerName]
+          )
+        );
+
+        console.log(
+          `Resposta inicial enviada com o modelo ${TEMPLATE_NAMES.novo_site} para ${message.from}; ` +
+          `message_id=${templateResult?.messages?.[0]?.id || "não retornado"}.`
+        );
       } catch (error) {
         console.error("Erro ao processar mensagem recebida:", error.meta || error);
       }
