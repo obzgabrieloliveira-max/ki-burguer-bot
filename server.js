@@ -27,6 +27,14 @@ const TEMPLATE_NAMES = {
 };
 
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
+const HEADER_IMAGE_SOURCE_URL = String(
+  process.env.HEADER_IMAGE_SOURCE_URL || "https://ki-pedidos.netlify.app/logo-ki.jpg"
+).trim();
+
+let cachedHeaderImage = null;
+let cachedHeaderImageType = "image/jpeg";
+let cachedHeaderImageAt = 0;
+const HEADER_IMAGE_CACHE_MS = 6 * 60 * 60 * 1000;
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
   process.env.HUMAN_SUPPORT_BUTTON_TEXT || "Falar com Atendente"
 ).trim().toLowerCase();
@@ -455,34 +463,60 @@ function extractIncomingMessages(body) {
   return results;
 }
 
-function extractMessageStatuses(body) {
-  const statuses = [];
-
-  for (const entry of body?.entry || []) {
-    for (const change of entry?.changes || []) {
-      if (change?.field !== "messages") continue;
-
-      for (const status of change?.value?.statuses || []) {
-        statuses.push({
-          id: status?.id || null,
-          recipientId: status?.recipient_id || null,
-          status: status?.status || "unknown",
-          timestamp: status?.timestamp || null,
-          errors: Array.isArray(status?.errors) ? status.errors : []
-        });
-      }
-    }
-  }
-
-  return statuses;
-}
-
 function isHumanSupportRequest(message) {
   const text = String(message?.text || "").trim().toLowerCase();
   return text === HUMAN_SUPPORT_BUTTON_TEXT.toLowerCase() ||
     text.includes("falar com atendente") ||
     text.includes("quero falar com um atendente");
 }
+
+app.get("/meta-header.jpg", async (_req, res) => {
+  try {
+    const now = Date.now();
+
+    if (!cachedHeaderImage || now - cachedHeaderImageAt > HEADER_IMAGE_CACHE_MS) {
+      const response = await fetch(HEADER_IMAGE_SOURCE_URL, {
+        headers: {
+          "User-Agent": "Ki-Burguer-Meta-Image-Proxy/1.0",
+          "Accept": "image/jpeg,image/png,image/*"
+        }
+      });
+
+      if (!response.ok) {
+        throw new Error(`Não foi possível carregar a imagem (${response.status}).`);
+      }
+
+      const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim();
+      if (!contentType.startsWith("image/")) {
+        throw new Error(`A origem não retornou uma imagem válida: ${contentType || "sem content-type"}.`);
+      }
+
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (!buffer.length) throw new Error("A imagem retornada está vazia.");
+
+      cachedHeaderImage = buffer;
+      cachedHeaderImageType = contentType;
+      cachedHeaderImageAt = now;
+      console.log(`Imagem do cabeçalho atualizada no cache (${buffer.length} bytes).`);
+    }
+
+    res.set({
+      "Content-Type": cachedHeaderImageType,
+      "Content-Length": String(cachedHeaderImage.length),
+      "Cache-Control": "public, max-age=21600, immutable",
+      "Content-Disposition": 'inline; filename="meta-header.jpg"',
+      "X-Content-Type-Options": "nosniff"
+    });
+
+    return res.status(200).send(cachedHeaderImage);
+  } catch (error) {
+    console.error("Erro ao servir imagem do cabeçalho:", error);
+    return res.status(502).json({
+      ok: false,
+      error: error.message || "Erro ao carregar a imagem do cabeçalho."
+    });
+  }
+});
 
 app.get("/", (_req, res) => {
   res.json({
@@ -758,22 +792,6 @@ app.post("/webhook", (req, res) => {
   res.sendStatus(200);
   if (req.body?.object !== "whatsapp_business_account") return;
 
-  const statuses = extractMessageStatuses(req.body);
-
-  for (const delivery of statuses) {
-    if (delivery.status === "failed") {
-      console.error("FALHA NA ENTREGA DA META:", {
-        messageId: delivery.id,
-        recipient: delivery.recipientId,
-        errors: delivery.errors
-      });
-    } else {
-      console.log(
-        `STATUS META: ${delivery.status} | mensagem ${delivery.id || "-"} | destinatário ${delivery.recipientId || "-"}`
-      );
-    }
-  }
-
   const messages = extractIncomingMessages(req.body);
 
   for (const message of messages) {
@@ -797,20 +815,8 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        const customerName = String(message.contactName || "Cliente").trim() || "Cliente";
-
-        const templateResult = await trackedSend(() =>
-          sendTemplateMessage(
-            message.from,
-            TEMPLATE_NAMES.novo_site,
-            [customerName]
-          )
-        );
-
-        console.log(
-          `Modelo ${TEMPLATE_NAMES.novo_site} aceito pela Meta para ${message.from}; ` +
-          `message_id=${templateResult?.messages?.[0]?.id || "não retornado"}; aguardando status de entrega.`
-        );
+        await trackedSend(() => sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
+        console.log(`Resposta automática enviada para ${message.from}.`);
       } catch (error) {
         console.error("Erro ao processar mensagem recebida:", error.meta || error);
       }
@@ -831,4 +837,5 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Webhook: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Graph API: ${GRAPH_API_VERSION}`);
+  console.log(`Imagem pública do cabeçalho: /meta-header.jpg`);
 });
