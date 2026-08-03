@@ -10,13 +10,22 @@ const PORT = Number(process.env.PORT || 3000);
 const API_KEY = String(process.env.BOT_API_KEY || "").trim();
 const ALLOWED_ORIGIN = String(process.env.ALLOWED_ORIGIN || "").trim();
 
-const META_ACCESS_TOKEN = String(process.env.META_ACCESS_TOKEN || "").trim();
-const META_PHONE_NUMBER_ID = String(process.env.META_PHONE_NUMBER_ID || "").trim();
-const META_VERIFY_TOKEN = String(process.env.META_VERIFY_TOKEN || "").trim();
-const META_APP_SECRET = String(process.env.META_APP_SECRET || "").trim();
-const GRAPH_API_VERSION = String(process.env.GRAPH_API_VERSION || "v26.0").trim();
-const TEMPLATE_LANGUAGE = String(process.env.META_TEMPLATE_LANGUAGE || "pt_BR").trim();
+// Apollo Gateway
+// Cole em APOLLO_SEND_URL o endpoint completo mostrado no painel do Apollo.
+const APOLLO_SEND_URL = String(process.env.APOLLO_SEND_URL || "").trim();
+const APOLLO_API_KEY = String(process.env.APOLLO_API_KEY || "").trim();
+const APOLLO_AUTH_HEADER = String(process.env.APOLLO_AUTH_HEADER || "x-api-key").trim();
+const APOLLO_AUTH_PREFIX = String(process.env.APOLLO_AUTH_PREFIX || "").trim();
+const APOLLO_WEBHOOK_SECRET = String(process.env.APOLLO_WEBHOOK_SECRET || "").trim();
+const APOLLO_WEBHOOK_SECRET_HEADER = String(
+  process.env.APOLLO_WEBHOOK_SECRET_HEADER || "x-webhook-secret"
+).trim().toLowerCase();
+const APOLLO_PAYLOAD_MODE = String(
+  process.env.APOLLO_PAYLOAD_MODE || "meta_compatible"
+).trim().toLowerCase();
+const APOLLO_MEDIA_URL_TEMPLATE = String(process.env.APOLLO_MEDIA_URL_TEMPLATE || "").trim();
 
+const TEMPLATE_LANGUAGE = String(process.env.META_TEMPLATE_LANGUAGE || "pt_BR").trim();
 const TEMPLATE_NAMES = {
   novo_site: String(process.env.TEMPLATE_NOVO_SITE || "novo_site_kiburguer").trim(),
   pedido_cancelado: String(process.env.TEMPLATE_PEDIDO_CANCELADO || "pedido_cancelado1").trim(),
@@ -25,23 +34,15 @@ const TEMPLATE_NAMES = {
   pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status1").trim(),
   pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
-
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
-const HEADER_IMAGE_SOURCE_URL = String(
-  process.env.HEADER_IMAGE_SOURCE_URL || "https://ki-pedidos.netlify.app/logo-ki.jpg"
-).trim();
 
-let cachedHeaderImage = null;
-let cachedHeaderImageType = "image/jpeg";
-let cachedHeaderImageAt = 0;
-const HEADER_IMAGE_CACHE_MS = 6 * 60 * 60 * 1000;
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
   process.env.HUMAN_SUPPORT_BUTTON_TEXT || "Falar com Atendente"
 ).trim().toLowerCase();
 const HUMAN_SUPPORT_REPLY = String(
   process.env.HUMAN_SUPPORT_REPLY ||
   "Certo! 💬 Sua solicitação de atendimento foi recebida. Em breve nossa equipe responderá por aqui."
-).replace(/\n/g, "\n").trim();
+).replace(/\\n/g, "\n").trim();
 
 const SITE_URL = String(process.env.SITE_URL || "https://ki-pedidos.netlify.app/").trim();
 const AUTO_REPLY_MESSAGE = String(
@@ -54,60 +55,31 @@ const ALLOW_REMOTE_SHUTDOWN = String(process.env.ALLOW_REMOTE_SHUTDOWN || "false
 const botStats = { sent: 0, failed: 0, received: 0, startedAt: new Date().toISOString() };
 const processedMessageIds = new Map();
 const MESSAGE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-
 const receivedMessages = [];
 const MAX_RECEIVED_MESSAGES = 500;
-
-function storeReceivedMessage(message) {
-  const item = {
-    id: String(message?.id || crypto.randomUUID()),
-    phone: String(message?.from || ""),
-    name: String(message?.contactName || "Cliente"),
-    type: String(message?.type || "unknown"),
-    text: String(message?.text || ""),
-    mediaId: String(message?.mediaId || ""),
-    mimeType: String(message?.mimeType || ""),
-    voice: Boolean(message?.voice),
-    receivedAt: new Date().toISOString(),
-    read: false
-  };
-
-  receivedMessages.unshift(item);
-
-  if (receivedMessages.length > MAX_RECEIVED_MESSAGES) {
-    receivedMessages.length = MAX_RECEIVED_MESSAGES;
-  }
-
-  return item;
-}
 
 function validateConfiguration() {
   const missing = [];
   if (!API_KEY || API_KEY === "troque-por-uma-senha-forte") missing.push("BOT_API_KEY");
-  if (!META_ACCESS_TOKEN) missing.push("META_ACCESS_TOKEN");
-  if (!META_PHONE_NUMBER_ID) missing.push("META_PHONE_NUMBER_ID");
-  if (!META_VERIFY_TOKEN) missing.push("META_VERIFY_TOKEN");
-
+  if (!APOLLO_SEND_URL) missing.push("APOLLO_SEND_URL");
+  if (!APOLLO_API_KEY) missing.push("APOLLO_API_KEY");
   if (missing.length) {
-    console.error(`\nERRO: configure no arquivo .env: ${missing.join(", ")}\n`);
+    console.error(`\nERRO: configure no Render/.env: ${missing.join(", ")}\n`);
     process.exit(1);
   }
 }
-
 validateConfiguration();
 
 app.use(express.json({
-  limit: "250kb",
+  limit: "5mb",
   verify(req, _res, buffer) {
     req.rawBody = buffer;
   }
 }));
 
-const configuredOrigins = ALLOWED_ORIGIN
-  .split(",")
+const configuredOrigins = ALLOWED_ORIGIN.split(",")
   .map(value => value.trim().replace(/\/$/, ""))
   .filter(Boolean);
-
 const allowedOrigins = new Set([
   "https://ki-pedidos.netlify.app",
   "https://ki-cardapio.netlify.app",
@@ -115,20 +87,13 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:3000",
   ...configuredOrigins
 ]);
-
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin || origin === "null") {
-  return callback(null, true);
-}
-
+    if (!origin || origin === "null") return callback(null, true);
     const normalizedOrigin = String(origin).trim().replace(/\/$/, "");
-    const isAllowed =
-      allowedOrigins.has(normalizedOrigin) ||
+    const isAllowed = allowedOrigins.has(normalizedOrigin) ||
       /^https:\/\/[a-z0-9-]+(?:--[a-z0-9-]+)?\.netlify\.app$/i.test(normalizedOrigin);
-
     if (isAllowed) return callback(null, true);
-
     console.warn(`CORS bloqueou: ${normalizedOrigin}`);
     return callback(new Error(`Origem não autorizada pelo CORS: ${normalizedOrigin}`));
   },
@@ -136,7 +101,6 @@ const corsOptions = {
   allowedHeaders: ["Content-Type", "x-api-key"],
   optionsSuccessStatus: 204
 };
-
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
@@ -147,21 +111,13 @@ function requireApiKey(req, res, next) {
   next();
 }
 
-function verifyMetaSignature(req) {
-  if (!META_APP_SECRET) return true;
-  const signature = String(req.get("x-hub-signature-256") || "");
-  if (!signature.startsWith("sha256=") || !req.rawBody) return false;
-
-  const expected = "sha256=" + crypto
-    .createHmac("sha256", META_APP_SECRET)
-    .update(req.rawBody)
-    .digest("hex");
-
-  const receivedBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expected);
-
-  return receivedBuffer.length === expectedBuffer.length &&
-    crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+function verifyApolloWebhook(req) {
+  if (!APOLLO_WEBHOOK_SECRET) return true;
+  const received = String(req.get(APOLLO_WEBHOOK_SECRET_HEADER) || "");
+  if (!received) return false;
+  const a = Buffer.from(received);
+  const b = Buffer.from(APOLLO_WEBHOOK_SECRET);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 function normalizeBrazilianPhone(input) {
@@ -173,849 +129,383 @@ function normalizeBrazilianPhone(input) {
   }
   return digits;
 }
-
 function cleanMessage(text) {
   const message = String(text || "").trim();
   if (!message) throw new Error("A mensagem está vazia.");
   if (message.length > 4096) throw new Error("A mensagem ultrapassa 4.096 caracteres.");
   return message;
 }
-
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
-}
-
+function wait(ms) { return new Promise(resolve => setTimeout(resolve, Math.max(0, Number(ms) || 0))); }
 async function trackedSend(task) {
-  try {
-    const result = await task();
-    botStats.sent += 1;
-    return result;
-  } catch (error) {
-    botStats.failed += 1;
-    throw error;
-  }
+  try { const result = await task(); botStats.sent += 1; return result; }
+  catch (error) { botStats.failed += 1; throw error; }
+}
+function authHeaders() {
+  const value = APOLLO_AUTH_PREFIX ? `${APOLLO_AUTH_PREFIX} ${APOLLO_API_KEY}` : APOLLO_API_KEY;
+  return { "Content-Type": "application/json", [APOLLO_AUTH_HEADER]: value };
 }
 
-async function metaRequest(path, body) {
-  const response = await fetch(`https://graph.facebook.com/${GRAPH_API_VERSION}/${path}`, {
+async function apolloRequest(body) {
+  const response = await fetch(APOLLO_SEND_URL, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${META_ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
-    },
+    headers: authHeaders(),
     body: JSON.stringify(body)
   });
-
-  const data = await response.json().catch(() => ({}));
-
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
   if (!response.ok) {
-    const detail = data?.error?.error_user_msg || data?.error?.message || `Erro HTTP ${response.status}`;
-    const error = new Error(detail);
+    const detail = data?.error?.message || data?.error || data?.message || `Erro HTTP ${response.status}`;
+    const error = new Error(String(detail));
     error.status = response.status;
-    error.meta = data;
+    error.apollo = data;
     throw error;
   }
-
   return data;
 }
 
-async function getMetaMediaMetadata(mediaId) {
-  const response = await fetch(
-    `https://graph.facebook.com/${GRAPH_API_VERSION}/${encodeURIComponent(mediaId)}`,
-    {
-      headers: {
-        Authorization: `Bearer ${META_ACCESS_TOKEN}`
-      }
-    }
-  );
-
-  const data = await response.json().catch(() => ({}));
-
-  if (!response.ok || !data?.url) {
-    const detail =
-      data?.error?.error_user_msg ||
-      data?.error?.message ||
-      `Não foi possível localizar a mídia na Meta (${response.status}).`;
-    const error = new Error(detail);
-    error.status = response.status;
-    error.meta = data;
-    throw error;
+function buildApolloTextPayload(phone, message, replyToMessageId = null) {
+  const to = normalizeBrazilianPhone(phone);
+  const body = cleanMessage(message);
+  if (APOLLO_PAYLOAD_MODE === "simple") {
+    return { to, phone: to, message: body, text: body, replyToMessageId: replyToMessageId || undefined };
   }
-
-  return data;
-}
-
-async function downloadMetaMedia(mediaId) {
-  const metadata = await getMetaMediaMetadata(mediaId);
-
-  const response = await fetch(metadata.url, {
-    headers: {
-      Authorization: `Bearer ${META_ACCESS_TOKEN}`
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Não foi possível baixar o áudio da Meta (${response.status}).`);
-  }
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length) throw new Error("O áudio retornado pela Meta está vazio.");
-
-  return {
-    buffer,
-    contentType: String(
-      response.headers.get("content-type") ||
-      metadata?.mime_type ||
-      "audio/ogg"
-    ).split(";")[0].trim()
-  };
-}
-
-async function sendTextMessage(phone, message, replyToMessageId = null) {
   const payload = {
     messaging_product: "whatsapp",
     recipient_type: "individual",
-    to: normalizeBrazilianPhone(phone),
+    to,
     type: "text",
-    text: { preview_url: true, body: cleanMessage(message) }
+    text: { preview_url: true, body }
   };
-
   if (replyToMessageId) payload.context = { message_id: replyToMessageId };
-  return metaRequest(`${META_PHONE_NUMBER_ID}/messages`, payload);
+  return payload;
 }
-
-
-function templateTextParameter(value) {
-  const text = String(value ?? "").trim() || "-";
-  return { type: "text", text };
+async function sendTextMessage(phone, message, replyToMessageId = null) {
+  return apolloRequest(buildApolloTextPayload(phone, message, replyToMessageId));
 }
-
+function templateTextParameter(value) { return { type: "text", text: String(value ?? "").trim() || "-" }; }
 function templateUsesImageHeader(templateName) {
-  const normalized = String(templateName || "").trim();
-
-  return new Set([
-    TEMPLATE_NAMES.novo_site,
-    TEMPLATE_NAMES.pedido_pix,
-    TEMPLATE_NAMES.pedido_cancelado
-  ]).has(normalized);
+  return new Set([TEMPLATE_NAMES.novo_site, TEMPLATE_NAMES.pedido_pix, TEMPLATE_NAMES.pedido_cancelado])
+    .has(String(templateName || "").trim());
 }
-
+function buildApolloTemplatePayload(phone, templateName, parameters = []) {
+  const to = normalizeBrazilianPhone(phone);
+  if (APOLLO_PAYLOAD_MODE === "simple") {
+    return { to, phone: to, type: "template", template: templateName, language: TEMPLATE_LANGUAGE, parameters };
+  }
+  const components = [];
+  if (templateUsesImageHeader(templateName) && TEMPLATE_HEADER_IMAGE_URL) {
+    components.push({ type: "header", parameters: [{ type: "image", image: { link: TEMPLATE_HEADER_IMAGE_URL } }] });
+  }
+  if (parameters.length) components.push({ type: "body", parameters: parameters.map(templateTextParameter) });
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to,
+    type: "template",
+    template: { name: templateName, language: { code: TEMPLATE_LANGUAGE }, components }
+  };
+}
 async function sendTemplateMessage(phone, templateName, parameters = []) {
   if (!templateName) throw new Error("Nome do modelo de mensagem não configurado.");
-
-  const components = [];
-
-  if (templateUsesImageHeader(templateName)) {
-    if (!TEMPLATE_HEADER_IMAGE_URL) {
-      throw new Error(
-        `O modelo ${templateName} exige imagem no cabeçalho. Configure META_TEMPLATE_HEADER_IMAGE_URL.`
-      );
-    }
-
-    components.push({
-      type: "header",
-      parameters: [
-        {
-          type: "image",
-          image: { link: TEMPLATE_HEADER_IMAGE_URL }
-        }
-      ]
-    });
-  }
-
-  if (parameters.length) {
-    components.push({
-      type: "body",
-      parameters: parameters.map(templateTextParameter)
-    });
-  }
-
-  const payload = {
-    messaging_product: "whatsapp",
-    recipient_type: "individual",
-    to: normalizeBrazilianPhone(phone),
-    type: "template",
-    template: {
-      name: templateName,
-      language: { code: TEMPLATE_LANGUAGE },
-      components
-    }
-  };
-
-  console.log("Enviando template para a Meta:", {
-    phone: normalizeBrazilianPhone(phone),
-    template: templateName,
-    language: TEMPLATE_LANGUAGE,
-    parameters
-  });
-
-  const result = await metaRequest(`${META_PHONE_NUMBER_ID}/messages`, payload);
-
-  console.log("Meta aceitou o template:", {
-    phone: normalizeBrazilianPhone(phone),
-    template: templateName,
-    messageId: result?.messages?.[0]?.id || null,
-    response: result
-  });
-
-  return result;
+  return apolloRequest(buildApolloTemplatePayload(phone, templateName, parameters));
+}
+function responseMessageId(result) {
+  return result?.messages?.[0]?.id || result?.messageId || result?.message_id || result?.id || null;
 }
 
-function orderName(order) {
-  return String(
-    order?.name ||
-    order?.customer_name ||
-    order?.client_name ||
-    order?.nome ||
-    "Cliente"
-  ).trim() || "Cliente";
-}
-
-function orderNumber(order) {
-  const value = order?.id || order?.order_id || order?.number || order?.numero || "novo";
-  return String(value).slice(0, 12);
-}
-
-function orderPhone(order) {
-  return (
-    order?.phone ||
-    order?.telefone ||
-    order?.whatsapp ||
-    order?.customer_phone ||
-    order?.client_phone ||
-    order?.celular ||
-    ""
-  );
-}
-
+function orderName(order) { return String(order?.name || order?.customer_name || order?.client_name || order?.nome || "Cliente").trim() || "Cliente"; }
+function orderNumber(order) { return String(order?.id || order?.order_id || order?.number || order?.numero || "novo").slice(0, 12); }
+function orderPhone(order) { return order?.phone || order?.telefone || order?.whatsapp || order?.customer_phone || order?.client_phone || order?.celular || ""; }
 function isPixPayment(order) {
-  const payment = String(
-    order?.payment_method ||
-    order?.payment ||
-    order?.forma_pagamento ||
-    ""
-  ).toLowerCase();
-
+  const payment = String(order?.payment_method || order?.payment || order?.forma_pagamento || "").toLowerCase();
   return payment.includes("pix") && !payment.includes("maquininha");
 }
-
 function normalizeOrderStatus(status) {
-  return String(status || "")
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[\s-]+/g, "_");
+  return String(status || "").trim().toLowerCase().normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "").replace(/[\s-]+/g, "_");
 }
-
 function statusLabel(status) {
-  const normalized = normalizeOrderStatus(status);
   const labels = {
-    novo: "👨‍🍳 Em preparo",
-    recebido: "👨‍🍳 Em preparo",
-    pedido_recebido: "👨‍🍳 Em preparo",
-    confirmado: "👨‍🍳 Em preparo",
-    preparo: "👨‍🍳 Em preparo",
-    em_preparo: "👨‍🍳 Em preparo",
+    novo: "👨‍🍳 Em preparo", recebido: "👨‍🍳 Em preparo", pedido_recebido: "👨‍🍳 Em preparo",
+    confirmado: "👨‍🍳 Em preparo", preparo: "👨‍🍳 Em preparo", em_preparo: "👨‍🍳 Em preparo",
     pagamento_confirmado: "✅ Pagamento confirmado — pedido em preparo",
-    saiu_entrega: "🛵 Saiu para entrega",
-    saiu_para_entrega: "🛵 Saiu para entrega",
-    entregue: "🎉 Pedido entregue",
-    concluido: "🎉 Pedido entregue"
+    saiu_entrega: "🛵 Saiu para entrega", saiu_para_entrega: "🛵 Saiu para entrega",
+    entregue: "🎉 Pedido entregue", concluido: "🎉 Pedido entregue"
   };
-  return labels[normalized] || String(status || "Atualizado").trim();
+  return labels[normalizeOrderStatus(status)] || String(status || "Atualizado").trim();
 }
-
 function templateForOrderStatus(order, status) {
   const normalized = normalizeOrderStatus(status);
-  const name = orderName(order);
-  const number = orderNumber(order);
-
-  const mappings = {
-    aguardando_comprovante: {
-      name: TEMPLATE_NAMES.pedido_pix,
-      parameters: [name, number]
-    },
-    pix_pendente: {
-      name: TEMPLATE_NAMES.pedido_pix,
-      parameters: [name, number]
-    },
-    novo: {
-      name: TEMPLATE_NAMES.pedido_em_preparo,
-      parameters: [name, number]
-    },
-    recebido: {
-      name: TEMPLATE_NAMES.pedido_em_preparo,
-      parameters: [name, number]
-    },
-    pedido_recebido: {
-      name: TEMPLATE_NAMES.pedido_em_preparo,
-      parameters: [name, number]
-    },
-    confirmado: {
-      name: TEMPLATE_NAMES.pedido_em_preparo,
-      parameters: [name, number]
-    },
-    preparo: {
-      name: TEMPLATE_NAMES.pedido_em_preparo,
-      parameters: [name, number]
-    },
-    em_preparo: {
-      name: TEMPLATE_NAMES.pedido_em_preparo,
-      parameters: [name, number]
-    },
-    entregue: {
-      name: TEMPLATE_NAMES.pedido_entregue,
-      parameters: [name, number]
-    },
-    concluido: {
-      name: TEMPLATE_NAMES.pedido_entregue,
-      parameters: [name, number]
-    },
-    cancelado: {
-      name: TEMPLATE_NAMES.pedido_cancelado,
-      parameters: [name, number]
-    }
+  const params = [orderName(order), orderNumber(order)];
+  const map = {
+    aguardando_comprovante: TEMPLATE_NAMES.pedido_pix, pix_pendente: TEMPLATE_NAMES.pedido_pix,
+    novo: TEMPLATE_NAMES.pedido_em_preparo, recebido: TEMPLATE_NAMES.pedido_em_preparo,
+    pedido_recebido: TEMPLATE_NAMES.pedido_em_preparo, confirmado: TEMPLATE_NAMES.pedido_em_preparo,
+    preparo: TEMPLATE_NAMES.pedido_em_preparo, em_preparo: TEMPLATE_NAMES.pedido_em_preparo,
+    entregue: TEMPLATE_NAMES.pedido_entregue, concluido: TEMPLATE_NAMES.pedido_entregue,
+    cancelado: TEMPLATE_NAMES.pedido_cancelado
   };
-
-  return mappings[normalized] || {
-    name: TEMPLATE_NAMES.pedido_status,
-    parameters: [name, number, statusLabel(status)]
-  };
+  return map[normalized]
+    ? { name: map[normalized], parameters: params }
+    : { name: TEMPLATE_NAMES.pedido_status, parameters: [...params, statusLabel(status)] };
 }
-
 async function sendOrderTemplate(order, status) {
   const phone = orderPhone(order);
   if (!phone) throw new Error("O pedido não possui telefone.");
-
   const selected = templateForOrderStatus(order, status);
   const result = await sendTemplateMessage(phone, selected.name, selected.parameters);
+  return { result, phone: normalizeBrazilianPhone(phone), template: selected.name, status: normalizeOrderStatus(status) };
+}
 
+function first(...values) { return values.find(v => v !== undefined && v !== null && v !== ""); }
+function getByPath(obj, path) {
+  return path.split(".").reduce((value, key) => value?.[key], obj);
+}
+function pick(obj, paths) { return first(...paths.map(path => getByPath(obj, path))); }
+function normalizeType(raw, payload) {
+  const value = String(raw || "").toLowerCase();
+  if (value.includes("audio") || value.includes("voice")) return "audio";
+  if (value.includes("image") || value.includes("photo")) return "image";
+  if (value.includes("video")) return "video";
+  if (value.includes("document") || value.includes("file")) return "document";
+  if (value.includes("sticker")) return "sticker";
+  if (payload?.audio || payload?.voice) return "audio";
+  if (payload?.image) return "image";
+  if (payload?.video) return "video";
+  if (payload?.document) return "document";
+  return "text";
+}
+function parseOneMessage(payload, inherited = {}) {
+  if (!payload || typeof payload !== "object") return null;
+  const directionRaw = String(first(payload.direction, payload.messageDirection, payload.event_direction, inherited.direction, "incoming")).toLowerCase();
+  const outgoing = directionRaw.includes("out") || payload.fromMe === true || payload.isFromMe === true || payload.echo === true;
+  const type = normalizeType(first(payload.type, payload.message_type, payload.messageType, payload.kind), payload);
+  const mediaObject = first(payload[type], payload.media, payload.attachment, {});
+  const id = String(first(payload.id, payload.message_id, payload.messageId, payload.key?.id, crypto.randomUUID()));
+  const phone = String(first(
+    payload.from, payload.phone, payload.wa_id, payload.sender, payload.senderId,
+    payload.contact?.phone, payload.contact?.wa_id, payload.key?.remoteJid, inherited.phone, ""
+  )).replace(/@.+$/, "").replace(/\D/g, "");
+  const text = String(first(
+    payload.text?.body, payload.text, payload.body, payload.message, payload.content,
+    payload.caption, payload.interactive?.button_reply?.title, payload.interactive?.list_reply?.title,
+    payload.button?.text, ""
+  ));
+  const mediaId = String(first(
+    mediaObject?.id, payload.mediaId, payload.media_id, payload.attachmentId, payload.attachment_id, ""
+  ));
+  const mediaUrl = String(first(
+    mediaObject?.url, mediaObject?.link, payload.mediaUrl, payload.media_url,
+    payload.downloadUrl, payload.download_url, payload.url, ""
+  ));
   return {
-    result,
-    phone: normalizeBrazilianPhone(phone),
-    template: selected.name,
-    status: normalizeOrderStatus(status)
+    id, from: phone, type, text,
+    contactName: String(first(payload.contactName, payload.name, payload.profileName, payload.contact?.name, inherited.name, "Cliente")),
+    mediaId, mediaUrl,
+    mimeType: String(first(mediaObject?.mime_type, mediaObject?.mimeType, payload.mimeType, payload.mime_type, "")),
+    fileName: String(first(mediaObject?.filename, payload.filename, payload.file_name, "")),
+    voice: Boolean(payload.voice || payload.audio?.voice || type === "audio"),
+    direction: outgoing ? "outgoing" : "incoming",
+    timestamp: first(payload.timestamp, payload.createdAt, payload.receivedAt, Date.now()),
+    status: String(first(payload.status, inherited.status, outgoing ? "sent" : "received"))
   };
 }
-
-async function markMessageAsRead(messageId) {
-  if (!messageId) return;
-  try {
-    await metaRequest(`${META_PHONE_NUMBER_ID}/messages`, {
-      messaging_product: "whatsapp",
-      status: "read",
-      message_id: messageId
-    });
-  } catch (error) {
-    console.warn("Não foi possível marcar a mensagem como lida:", error.message);
+function extractWebhookMessages(body) {
+  const results = [];
+  // Formato Meta-compatible, que muitos gateways mantêm.
+  for (const entry of body?.entry || []) {
+    for (const change of entry?.changes || []) {
+      const value = change?.value || {};
+      const name = value?.contacts?.[0]?.profile?.name || "Cliente";
+      for (const message of value?.messages || []) {
+        const parsed = parseOneMessage(message, { name, direction: "incoming" });
+        if (parsed) results.push(parsed);
+      }
+    }
   }
+  // Formatos genéricos do Apollo/gateways: message, data.message, payload, messages, data.messages.
+  const candidates = [body?.message, body?.data?.message, body?.payload?.message, body?.payload];
+  for (const candidate of candidates) {
+    const parsed = parseOneMessage(candidate, {
+      direction: first(body?.direction, body?.event?.includes?.("out") ? "outgoing" : "incoming"),
+      status: body?.status
+    });
+    if (parsed && (parsed.from || parsed.text || parsed.mediaId || parsed.mediaUrl)) results.push(parsed);
+  }
+  for (const list of [body?.messages, body?.data?.messages, body?.payload?.messages]) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      const parsed = parseOneMessage(item, { direction: body?.direction, status: body?.status });
+      if (parsed) results.push(parsed);
+    }
+  }
+  const unique = new Map();
+  for (const item of results) unique.set(`${item.id}:${item.direction}`, item);
+  return [...unique.values()];
 }
-
 function isDuplicateMessage(messageId) {
   const now = Date.now();
-  for (const [id, timestamp] of processedMessageIds.entries()) {
-    if (now - timestamp > MESSAGE_CACHE_TTL_MS) processedMessageIds.delete(id);
-  }
+  for (const [id, timestamp] of processedMessageIds.entries()) if (now - timestamp > MESSAGE_CACHE_TTL_MS) processedMessageIds.delete(id);
   if (processedMessageIds.has(messageId)) return true;
   processedMessageIds.set(messageId, now);
   return false;
 }
-
-function extractMessageStatuses(body) {
-  const results = [];
-
-  for (const entry of body?.entry || []) {
-    for (const change of entry?.changes || []) {
-      if (change?.field !== "messages") continue;
-
-      const value = change?.value || {};
-
-      for (const status of value?.statuses || []) {
-        results.push({
-          id: status?.id || null,
-          recipientId: status?.recipient_id || null,
-          status: status?.status || "unknown",
-          timestamp: status?.timestamp || null,
-          conversation: status?.conversation || null,
-          pricing: status?.pricing || null,
-          errors: Array.isArray(status?.errors) ? status.errors : []
-        });
-      }
-    }
-  }
-
-  return results;
+function storeReceivedMessage(message) {
+  const item = {
+    id: String(message.id || crypto.randomUUID()),
+    phone: String(message.from || ""),
+    name: String(message.contactName || "Cliente"),
+    type: String(message.type || "unknown"),
+    text: String(message.text || ""),
+    mediaId: String(message.mediaId || ""),
+    mediaUrl: String(message.mediaUrl || ""),
+    mimeType: String(message.mimeType || ""),
+    filename: String(message.fileName || ""),
+    voice: Boolean(message.voice),
+    direction: String(message.direction || "incoming"),
+    status: String(message.status || "received"),
+    receivedAt: new Date(Number(message.timestamp) > 1e12 ? Number(message.timestamp) : Number(message.timestamp) * 1000 || Date.now()).toISOString(),
+    read: message.direction === "outgoing"
+  };
+  receivedMessages.unshift(item);
+  if (receivedMessages.length > MAX_RECEIVED_MESSAGES) receivedMessages.length = MAX_RECEIVED_MESSAGES;
+  return item;
 }
-
-function logMessageStatuses(body) {
-  const statuses = extractMessageStatuses(body);
-
-  for (const item of statuses) {
-    const details = {
-      messageId: item.id,
-      recipient: item.recipientId,
-      status: item.status,
-      conversation: item.conversation,
-      pricing: item.pricing
-    };
-
-    if (item.status === "failed" || item.errors.length) {
-      console.error("FALHA NA ENTREGA DA META:", {
-        ...details,
-        errors: item.errors
-      });
-    } else {
-      console.log(`STATUS META: ${item.status}`, details);
-    }
-  }
-}
-
-function extractIncomingMessages(body) {
-  const results = [];
-  for (const entry of body?.entry || []) {
-    for (const change of entry?.changes || []) {
-      if (change?.field !== "messages") continue;
-      const value = change?.value || {};
-      const contactName = value?.contacts?.[0]?.profile?.name || null;
-
-      for (const message of value?.messages || []) {
-        const interactiveText =
-          message?.interactive?.button_reply?.title ||
-          message?.interactive?.list_reply?.title ||
-          "";
-        const buttonText = message?.button?.text || message?.button?.payload || "";
-
-        const media =
-          message?.audio ||
-          message?.voice ||
-          message?.document ||
-          message?.image ||
-          message?.video ||
-          null;
-
-        results.push({
-          id: message?.id,
-          from: message?.from,
-          type: message?.type,
-          text: message?.text?.body || interactiveText || buttonText || "",
-          contactName,
-          mediaId: media?.id || "",
-          mimeType: media?.mime_type || "",
-          voice: Boolean(message?.audio?.voice)
-        });
-      }
-    }
-  }
-  return results;
-}
-
 function isHumanSupportRequest(message) {
   const text = String(message?.text || "").trim().toLowerCase();
-  return text === HUMAN_SUPPORT_BUTTON_TEXT.toLowerCase() ||
-    text.includes("falar com atendente") ||
-    text.includes("quero falar com um atendente");
+  return text === HUMAN_SUPPORT_BUTTON_TEXT || text.includes("falar com atendente") || text.includes("quero falar com um atendente");
 }
 
-app.get("/meta-header.jpg", async (_req, res) => {
-  try {
-    const now = Date.now();
-
-    if (!cachedHeaderImage || now - cachedHeaderImageAt > HEADER_IMAGE_CACHE_MS) {
-      const response = await fetch(HEADER_IMAGE_SOURCE_URL, {
-        headers: {
-          "User-Agent": "Ki-Burguer-Meta-Image-Proxy/1.0",
-          "Accept": "image/jpeg,image/png,image/*"
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`Não foi possível carregar a imagem (${response.status}).`);
-      }
-
-      const contentType = String(response.headers.get("content-type") || "").split(";")[0].trim();
-      if (!contentType.startsWith("image/")) {
-        throw new Error(`A origem não retornou uma imagem válida: ${contentType || "sem content-type"}.`);
-      }
-
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (!buffer.length) throw new Error("A imagem retornada está vazia.");
-
-      cachedHeaderImage = buffer;
-      cachedHeaderImageType = contentType;
-      cachedHeaderImageAt = now;
-      console.log(`Imagem do cabeçalho atualizada no cache (${buffer.length} bytes).`);
-    }
-
-    res.set({
-      "Content-Type": cachedHeaderImageType,
-      "Content-Length": String(cachedHeaderImage.length),
-      "Cache-Control": "public, max-age=21600, immutable",
-      "Content-Disposition": 'inline; filename="meta-header.jpg"',
-      "X-Content-Type-Options": "nosniff"
-    });
-
-    return res.status(200).send(cachedHeaderImage);
-  } catch (error) {
-    console.error("Erro ao servir imagem do cabeçalho:", error);
-    return res.status(502).json({
-      ok: false,
-      error: error.message || "Erro ao carregar a imagem do cabeçalho."
-    });
+async function fetchMedia(message) {
+  if (message.mediaUrl) {
+    const response = await fetch(message.mediaUrl, { headers: authHeaders() });
+    if (!response.ok) throw new Error(`Não foi possível baixar a mídia (${response.status}).`);
+    return { buffer: Buffer.from(await response.arrayBuffer()), contentType: response.headers.get("content-type") || message.mimeType || "application/octet-stream" };
   }
-});
+  if (!message.mediaId || !APOLLO_MEDIA_URL_TEMPLATE) throw new Error("O Apollo não forneceu URL da mídia. Configure APOLLO_MEDIA_URL_TEMPLATE se disponível.");
+  const url = APOLLO_MEDIA_URL_TEMPLATE.replace("{id}", encodeURIComponent(message.mediaId));
+  const response = await fetch(url, { headers: authHeaders() });
+  if (!response.ok) throw new Error(`Não foi possível baixar a mídia (${response.status}).`);
+  return { buffer: Buffer.from(await response.arrayBuffer()), contentType: response.headers.get("content-type") || message.mimeType || "application/octet-stream" };
+}
 
-app.get("/", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "Bot WhatsApp Ki-Burguer — Meta Cloud API",
-    enabled: botEnabled,
-    graphApiVersion: GRAPH_API_VERSION,
-    webhook: "/webhook"
-  });
-});
-
+app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", enabled: botEnabled, webhook: "/webhook" }));
 app.get("/status", requireApiKey, (_req, res) => {
-  const configured = Boolean(META_ACCESS_TOKEN && META_PHONE_NUMBER_ID);
-  res.json({
-    ok: true,
-    enabled: botEnabled,
-    configured,
-    ready: configured,
-    state: configured ? "Cloud API conectada" : "Não configurado",
-    sent: botStats.sent,
-    failed: botStats.failed,
-    received: botStats.received,
-    startedAt: botStats.startedAt,
-    graphApiVersion: GRAPH_API_VERSION
-  });
+  const configured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
+  res.json({ ok: true, enabled: botEnabled, configured, ready: configured, state: configured ? "Apollo Gateway conectado" : "Não configurado", sent: botStats.sent, failed: botStats.failed, received: botStats.received, startedAt: botStats.startedAt, provider: "apollo" });
 });
-
 app.post("/toggle", requireApiKey, (req, res) => {
-  if (typeof req.body?.enabled !== "boolean") {
-    return res.status(400).json({ ok: false, error: 'Envie {"enabled": true} ou {"enabled": false}.' });
-  }
+  if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ ok: false, error: 'Envie {"enabled": true} ou {"enabled": false}.' });
   botEnabled = req.body.enabled;
-  return res.json({
-    ok: true,
-    enabled: botEnabled,
-    message: botEnabled ? "Automação ligada." : "Automação desligada."
-  });
+  res.json({ ok: true, enabled: botEnabled, message: botEnabled ? "Automação ligada." : "Automação desligada." });
 });
-
 
 app.post("/send-new-site", requireApiKey, async (req, res) => {
   try {
-    if (!botEnabled) {
-      return res.status(409).json({ ok: false, error: "A automação está desligada." });
-    }
-
+    if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
     const phone = normalizeBrazilianPhone(req.body?.phone);
     const name = String(req.body?.name || req.body?.nome || "Cliente").trim() || "Cliente";
-    const parameters = Array.isArray(req.body?.parameters)
-      ? req.body.parameters
-      : [name];
-
-    const result = await trackedSend(() =>
-      sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters)
-    );
-
-    return res.json({
-      ok: true,
-      phone,
-      template: TEMPLATE_NAMES.novo_site,
-      messageId: result?.messages?.[0]?.id || null
-    });
-  } catch (error) {
-    console.error("Erro ao enviar modelo do novo site:", error.meta || error);
-    return res.status(error.status || 500).json({
-      ok: false,
-      error: error.message || "Erro ao enviar o modelo do novo site.",
-      details: error.meta || undefined
-    });
-  }
+    const parameters = Array.isArray(req.body?.parameters) ? req.body.parameters : [name];
+    const result = await trackedSend(() => sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters));
+    res.json({ ok: true, phone, template: TEMPLATE_NAMES.novo_site, messageId: responseMessageId(result) });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
 });
-
 app.post("/order-created", requireApiKey, async (req, res) => {
-  console.log("======== NOVO PEDIDO ========");
-  console.log(JSON.stringify(req.body, null, 2));
-  console.log("=============================");
   try {
-    if (!botEnabled) {
-      return res.status(409).json({ ok: false, error: "A automação está desligada." });
-    }
-
+    if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
     const order = req.body?.order || req.body;
-    const initialStatus = isPixPayment(order) ? "aguardando_comprovante" : "preparo";
-    const sent = await trackedSend(() => sendOrderTemplate(order, initialStatus));
-
-    return res.json({
-      ok: true,
-      phone: sent.phone,
-      template: sent.template,
-      status: sent.status,
-      messageId: sent.result?.messages?.[0]?.id || null
-    });
-  } catch (error) {
-    console.error("Erro ao enviar modelo do novo pedido:", error.meta || error);
-    return res.status(error.status || 500).json({
-      ok: false,
-      error: error.message || "Erro ao enviar a mensagem do pedido.",
-      details: error.meta || undefined
-    });
-  }
+    const sent = await trackedSend(() => sendOrderTemplate(order, isPixPayment(order) ? "aguardando_comprovante" : "preparo"));
+    res.json({ ok: true, phone: sent.phone, template: sent.template, status: sent.status, messageId: responseMessageId(sent.result) });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
 });
-
 app.post("/send-status", requireApiKey, async (req, res) => {
   try {
-    if (!botEnabled) {
-      return res.status(409).json({ ok: false, error: "A automação está desligada." });
-    }
-
-    const order = req.body?.order || {};
-    const status = req.body?.status;
-    const sent = await trackedSend(() => sendOrderTemplate(order, status));
-
-    return res.json({
-      ok: true,
-      phone: sent.phone,
-      template: sent.template,
-      status: sent.status,
-      messageId: sent.result?.messages?.[0]?.id || null
-    });
-  } catch (error) {
-    console.error("Erro ao enviar modelo de status:", error.meta || error);
-    return res.status(error.status || 500).json({
-      ok: false,
-      error: error.message || "Erro ao enviar atualização do pedido.",
-      details: error.meta || undefined
-    });
-  }
+    if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
+    const sent = await trackedSend(() => sendOrderTemplate(req.body?.order || {}, req.body?.status));
+    res.json({ ok: true, phone: sent.phone, template: sent.template, status: sent.status, messageId: responseMessageId(sent.result) });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
 });
-
 app.post("/send", requireApiKey, async (req, res) => {
   try {
-    if (!botEnabled) {
-      return res.status(409).json({ ok: false, error: "A automação está desligada." });
-    }
-
     const phone = normalizeBrazilianPhone(req.body?.phone);
     const message = cleanMessage(req.body?.message);
+    // Envio manual continua disponível mesmo com automação pausada.
     const result = await trackedSend(() => sendTextMessage(phone, message));
-
-    return res.json({
-      ok: true,
-      phone,
-      messageId: result?.messages?.[0]?.id || null
-    });
-  } catch (error) {
-    console.error("Erro ao enviar mensagem:", error.meta || error);
-    return res.status(error.status || 500).json({
-      ok: false,
-      error: error.message || "Erro inesperado ao enviar a mensagem.",
-      details: error.meta || undefined
-    });
-  }
+    receivedMessages.unshift({ id: responseMessageId(result) || `local-${Date.now()}`, phone, name: String(req.body?.name || "Cliente"), type: "text", text: message, mediaId: "", mediaUrl: "", mimeType: "", filename: "", voice: false, direction: "outgoing", status: "sent", receivedAt: new Date().toISOString(), read: true });
+    res.json({ ok: true, phone, messageId: responseMessageId(result) });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
 });
-
 app.post("/broadcast", requireApiKey, async (req, res) => {
-  if (!botEnabled) {
-    return res.status(409).json({ ok: false, error: "A automação está desligada." });
-  }
-
-  const rawRecipients = Array.isArray(req.body?.recipients) ? req.body.recipients : [];
-  const delayMs = Math.min(60000, Math.max(1000, Number(req.body?.delayMs) || 5000));
+  if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
   let message;
-
-  try {
-    message = cleanMessage(req.body?.message);
-  } catch (error) {
-    return res.status(400).json({ ok: false, error: error.message });
-  }
-
+  try { message = cleanMessage(req.body?.message); } catch (error) { return res.status(400).json({ ok: false, error: error.message }); }
   const unique = new Map();
-  for (const recipient of rawRecipients.slice(0, 500)) {
-    try {
-      const phone = normalizeBrazilianPhone(recipient?.phone || recipient);
-      if (!unique.has(phone)) unique.set(phone, { phone, name: String(recipient?.name || "Cliente") });
-    } catch (_) {}
+  for (const recipient of (Array.isArray(req.body?.recipients) ? req.body.recipients : []).slice(0, 500)) {
+    try { const phone = normalizeBrazilianPhone(recipient?.phone || recipient); if (!unique.has(phone)) unique.set(phone, { phone, name: String(recipient?.name || "Cliente") }); } catch {}
   }
-
   const recipients = [...unique.values()];
-  if (!recipients.length) {
-    return res.status(400).json({ ok: false, error: "Nenhum destinatário válido foi informado." });
-  }
-
-  let sent = 0;
-  let failed = 0;
-  const errors = [];
-
-  for (let index = 0; index < recipients.length; index += 1) {
-    const recipient = recipients[index];
+  if (!recipients.length) return res.status(400).json({ ok: false, error: "Nenhum destinatário válido foi informado." });
+  const delayMs = Math.min(60000, Math.max(1000, Number(req.body?.delayMs) || 5000));
+  let sent = 0, failed = 0; const errors = [];
+  for (let i = 0; i < recipients.length; i += 1) {
+    const recipient = recipients[i];
     try {
-      const personalized = message
-        .replace(/\{\{nome\}\}/gi, recipient.name || "Cliente")
-        .replace(/\{\{telefone\}\}/gi, recipient.phone);
-      await trackedSend(() => sendTextMessage(recipient.phone, personalized));
-      sent += 1;
-    } catch (error) {
-      failed += 1;
-      errors.push({ phone: recipient.phone, error: error.message });
-    }
-
-    if (index < recipients.length - 1) await wait(delayMs);
+      const personalized = message.replace(/\{\{nome\}\}/gi, recipient.name).replace(/\{\{telefone\}\}/gi, recipient.phone);
+      await trackedSend(() => sendTextMessage(recipient.phone, personalized)); sent += 1;
+    } catch (error) { failed += 1; errors.push({ phone: recipient.phone, error: error.message }); }
+    if (i < recipients.length - 1) await wait(delayMs);
   }
-
-  return res.json({ ok: true, total: recipients.length, sent, failed, errors: errors.slice(0, 20) });
+  res.json({ ok: true, total: recipients.length, sent, failed, errors: errors.slice(0, 20) });
 });
 
 app.get("/messages", requireApiKey, (req, res) => {
   const limit = Math.min(500, Math.max(1, Number(req.query?.limit) || 200));
-  const unread = receivedMessages.filter(message => !message.read).length;
-
-  return res.json({
-    ok: true,
-    total: receivedMessages.length,
-    unread,
-    messages: receivedMessages.slice(0, limit)
-  });
+  res.json({ ok: true, total: receivedMessages.length, unread: receivedMessages.filter(m => !m.read).length, messages: receivedMessages.slice(0, limit) });
 });
-
 app.get("/messages/:id/media", requireApiKey, async (req, res) => {
   try {
-    const message = receivedMessages.find(
-      item => item.id === String(req.params.id)
-    );
-
-    if (!message) {
-      return res.status(404).json({
-        ok: false,
-        error: "Mensagem não encontrada."
-      });
-    }
-
-    if (message.type !== "audio" || !message.mediaId) {
-      return res.status(400).json({
-        ok: false,
-        error: "Esta mensagem não possui um áudio disponível."
-      });
-    }
-
-    const media = await downloadMetaMedia(message.mediaId);
-
-    res.set({
-      "Content-Type": media.contentType || message.mimeType || "audio/ogg",
-      "Content-Length": String(media.buffer.length),
-      "Cache-Control": "private, max-age=300",
-      "Content-Disposition": 'inline; filename="audio-whatsapp.ogg"',
-      "Accept-Ranges": "bytes",
-      "X-Content-Type-Options": "nosniff"
-    });
-
-    return res.status(200).send(media.buffer);
-  } catch (error) {
-    console.error("Erro ao carregar áudio do WhatsApp:", error.meta || error);
-    return res.status(error.status || 500).json({
-      ok: false,
-      error: error.message || "Não foi possível carregar o áudio."
-    });
-  }
+    const message = receivedMessages.find(item => item.id === String(req.params.id));
+    if (!message) return res.status(404).json({ ok: false, error: "Mensagem não encontrada." });
+    if (!message.mediaUrl && !message.mediaId) return res.status(400).json({ ok: false, error: "Esta mensagem não possui mídia disponível." });
+    const media = await fetchMedia(message);
+    const filename = message.filename || `whatsapp-${message.type || "media"}`;
+    res.set({ "Content-Type": media.contentType, "Content-Length": String(media.buffer.length), "Cache-Control": "private, max-age=300", "Content-Disposition": `inline; filename="${filename.replace(/[\"\r\n]/g, "")}"`, "X-Content-Type-Options": "nosniff" });
+    res.status(200).send(media.buffer);
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message || "Não foi possível carregar a mídia." }); }
 });
-
 app.post("/messages/:id/read", requireApiKey, (req, res) => {
   const message = receivedMessages.find(item => item.id === String(req.params.id));
-
-  if (!message) {
-    return res.status(404).json({
-      ok: false,
-      error: "Mensagem não encontrada."
-    });
-  }
-
-  message.read = true;
-  return res.json({ ok: true, message });
+  if (!message) return res.status(404).json({ ok: false, error: "Mensagem não encontrada." });
+  message.read = true; res.json({ ok: true, message });
+});
+app.post("/messages/read-all", requireApiKey, (_req, res) => { receivedMessages.forEach(m => { m.read = true; }); res.json({ ok: true }); });
+app.delete("/messages", requireApiKey, (_req, res) => { receivedMessages.length = 0; res.json({ ok: true, message: "Conversas apagadas com sucesso." }); });
+app.post("/shutdown", requireApiKey, (_req, res) => {
+  if (!ALLOW_REMOTE_SHUTDOWN) return res.status(403).json({ ok: false, error: "Encerramento remoto desativado." });
+  res.json({ ok: true, message: "Servidor será encerrado." }); setTimeout(() => process.exit(0), 400);
 });
 
-app.post("/messages/read-all", requireApiKey, (_req, res) => {
-  receivedMessages.forEach(message => {
-    message.read = true;
-  });
-
-  return res.json({ ok: true });
-});
-
-app.delete("/messages", requireApiKey, (_req, res) => {
-  receivedMessages.length = 0;
-  return res.json({
-    ok: true,
-    message: "Conversas apagadas com sucesso."
-  });
-});
-
-app.post("/shutdown", requireApiKey, (req, res) => {
-  if (!ALLOW_REMOTE_SHUTDOWN) {
-    return res.status(403).json({
-      ok: false,
-      error: "Encerramento remoto desativado. Defina ALLOW_REMOTE_SHUTDOWN=true no .env para liberar."
-    });
-  }
-
-  res.json({ ok: true, message: "Servidor será encerrado." });
-  setTimeout(() => process.exit(0), 400);
-});
-
-app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-
-  if (mode === "subscribe" && token === META_VERIFY_TOKEN) {
-    console.log("Webhook verificado pela Meta.");
-    return res.status(200).send(challenge);
-  }
-
-  return res.sendStatus(403);
-});
-
+// Alguns painéis testam o webhook com GET.
+app.get("/webhook", (_req, res) => res.status(200).json({ ok: true, provider: "apollo", message: "Webhook ativo" }));
 app.post("/webhook", (req, res) => {
-  if (!verifyMetaSignature(req)) return res.sendStatus(401);
-
+  if (!verifyApolloWebhook(req)) return res.status(401).json({ ok: false, error: "Segredo do webhook inválido." });
   res.sendStatus(200);
-  if (req.body?.object !== "whatsapp_business_account") return;
-
-  logMessageStatuses(req.body);
-
-  const messages = extractIncomingMessages(req.body);
-
+  const messages = extractWebhookMessages(req.body);
   for (const message of messages) {
     setImmediate(async () => {
       try {
-        if (!message.id || !message.from || isDuplicateMessage(message.id)) return;
+        if (!message.id || isDuplicateMessage(`${message.id}:${message.direction}`)) return;
         botStats.received += 1;
         storeReceivedMessage(message);
-
-        console.log(
-          `Mensagem recebida de ${message.contactName || message.from}:`,
-          message.type === "text" ? message.text : `[${message.type}]`
-        );
-
-        await markMessageAsRead(message.id);
-        if (!botEnabled) return;
-
+        console.log(`Webhook Apollo: ${message.direction} ${message.type} ${message.from || "sem número"}`);
+        if (message.direction === "outgoing" || !message.from || !botEnabled) return;
         if (isHumanSupportRequest(message)) {
           await trackedSend(() => sendTextMessage(message.from, HUMAN_SUPPORT_REPLY, message.id));
-          console.log(`ATENDIMENTO HUMANO SOLICITADO por ${message.contactName || message.from} (${message.from}).`);
           return;
         }
-
-        await trackedSend(() =>
-          sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
-        );
-
-        console.log(`Resposta automática de boas-vindas enviada para ${message.from}.`);
-      } catch (error) {
-        console.error("Erro ao processar mensagem recebida:", error.meta || error);
-      }
+        await trackedSend(() => sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
+      } catch (error) { console.error("Erro ao processar webhook Apollo:", error.apollo || error); }
     });
   }
 });
@@ -1024,24 +514,12 @@ app.use((error, _req, res, _next) => {
   console.error("Erro do servidor:", error);
   res.status(500).json({ ok: false, error: error.message || "Erro interno do servidor." });
 });
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log("==================================================");
-  console.log(" KI-BURGUER — META WHATSAPP CLOUD API");
+  console.log(" KI-BURGUER — APOLLO WHATSAPP GATEWAY");
   console.log("==================================================");
   console.log(`Servidor iniciado na porta ${PORT}`);
-  console.log(`Webhook: /webhook`);
+  console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
-  console.log(`Graph API: ${GRAPH_API_VERSION}`);
-  console.log(`Imagem pública do cabeçalho: /meta-header.jpg`);
-  console.log(`Templates com imagem: ${[
-    TEMPLATE_NAMES.novo_site,
-    TEMPLATE_NAMES.pedido_pix,
-    TEMPLATE_NAMES.pedido_cancelado
-  ].join(", ")}`);
-  console.log(`Templates sem imagem: ${[
-    TEMPLATE_NAMES.pedido_em_preparo,
-    TEMPLATE_NAMES.pedido_status,
-    TEMPLATE_NAMES.pedido_entregue
-  ].join(", ")}`);
+  console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
 });

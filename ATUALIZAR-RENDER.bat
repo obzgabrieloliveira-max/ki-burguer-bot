@@ -19,7 +19,7 @@ if errorlevel 1 (
 
 echo [3/4] Preparando Git...
 git add server.js package.json render.yaml .env.example .gitignore README.md
-git commit -m "Publicar bot Meta limpo com modelos aprovados"
+git commit -m "Migrar bot para Apollo Gateway"
 if errorlevel 1 (
   echo Nenhuma alteracao nova para enviar.
   pause

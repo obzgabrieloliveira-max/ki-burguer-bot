@@ -1,62 +1,61 @@
-# Ki-Burguer — Meta Cloud API
+# Ki-Burguer — Bot Apollo Gateway
 
-Projeto limpo para o Render.
+Backend do bot adaptado para usar o Apollo Gateway, mantendo as rotas que o cardápio e a dashboard já utilizam.
 
-## Modelos configurados
+## O que mudou
 
-| Evento | Modelo | Variáveis | Imagem |
-|---|---|---:|---|
-| Divulgação do novo site | `novo_site_kiburguer` | nome | Sim |
-| Pedido PIX criado | `pedido_pix1` | nome, número | Sim |
-| Pedido em preparo | `pedido_em_preparo` | nome, número | Não |
-| Status genérico | `pedido_status1` | nome, número, status | Não |
-| Pedido entregue | `pedido_entregue` | nome, número | Não |
-| Pedido cancelado | `pedido_cancelado1` | nome, número | Sim |
+- Removida a dependência direta de `META_ACCESS_TOKEN`, `META_PHONE_NUMBER_ID`, `META_VERIFY_TOKEN` e `META_APP_SECRET`.
+- Envio de texto, templates, status de pedido e broadcast passa pelo endpoint do Apollo.
+- O webhook `/webhook` aceita eventos Meta-compatible e formatos genéricos de gateway.
+- Mensagens manuais em `/send` continuam disponíveis mesmo quando a automação está pausada.
+- Imagens, áudios, vídeos e documentos são armazenados quando o webhook enviar `mediaUrl`/`media_url`.
 
-Os botões aprovados na Meta já fazem parte dos modelos. O servidor não precisa reenviá-los.
+## Configuração no Render
+
+Copie as variáveis de `.env.example` para **Environment** no Render.
+
+Variáveis indispensáveis:
+
+- `BOT_API_KEY`: mantenha a mesma chave usada na dashboard e no cardápio.
+- `APOLLO_SEND_URL`: endpoint completo que aparece no painel do Apollo.
+- `APOLLO_API_KEY`: chave gerada no Apollo.
+- `APOLLO_AUTH_HEADER`: cabeçalho indicado pelo Apollo, normalmente `x-api-key`.
+- `APOLLO_AUTH_PREFIX`: deixe vazio, exceto quando a documentação disser `Authorization: Bearer`.
+
+## Webhook no Apollo
+
+Cadastre:
+
+`https://SEU-SERVICO.onrender.com/webhook`
+
+Marque pelo menos:
+
+- mensagens recebidas;
+- ecos/mensagens de saída;
+- status de entrega, se disponível.
+
+## Payload
+
+O padrão é `APOLLO_PAYLOAD_MODE=meta_compatible`, porque gateways oficiais normalmente aceitam o corpo da Cloud API. Caso o endpoint do seu painel informe um corpo simples com `phone` e `message`, use `APOLLO_PAYLOAD_MODE=simple`.
+
+## Rotas preservadas
+
+- `GET /status`
+- `POST /toggle`
+- `POST /send`
+- `POST /broadcast`
+- `POST /order-created`
+- `POST /send-status`
+- `POST /send-new-site`
+- `GET /messages`
+- `GET /messages/:id/media`
+- `POST /messages/:id/read`
+- `DELETE /messages`
+- `POST /webhook`
 
 ## Instalação
 
-1. Copie todos os arquivos desta pasta para a raiz do repositório.
-2. No Render, abra **Environment**.
-3. Copie as variáveis de `ENV-RENDER.txt`.
-4. Preencha o token, Phone Number ID e a mesma `BOT_API_KEY` usada pela dashboard.
-5. Execute `ATUALIZAR-RENDER.bat`.
-6. Aguarde o serviço ficar **Live**.
-
-## Rotas principais
-
-- `GET /` — saúde pública.
-- `GET /status` — status protegido pela chave.
-- `POST /order-created` — envia `pedido_pix1` para PIX ou `pedido_em_preparo` para os demais.
-- `POST /send-status` — envia o modelo correspondente ao status.
-- `POST /send-new-site` — envia `novo_site_kiburguer`.
-- `POST /test-template` — teste manual de qualquer modelo.
-- `GET /messages` — mensagens recebidas.
-- `DELETE /messages` — apaga as conversas.
-- `GET/POST /webhook` — webhook da Meta.
-
-## Teste de modelo
-
-Exemplo de corpo para `POST /test-template`:
-
-```json
-{
-  "phone": "32999999999",
-  "template": "pedido_pix1",
-  "parameters": ["João", "1548"]
-}
+```bash
+npm install
+npm start
 ```
-
-Cabeçalhos:
-
-```text
-Content-Type: application/json
-x-api-key: SUA_BOT_API_KEY
-```
-
-## Observações
-
-- `novo_site_kiburguer`, `pedido_pix1` e `pedido_cancelado1` usam imagem.
-- A URL da imagem precisa ser pública e abrir diretamente.
-- As mensagens recebidas ficam em memória e são apagadas se o Render reiniciar.
