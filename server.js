@@ -3,6 +3,10 @@ require("dotenv").config();
 const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+
+const execFileAsync = promisify(execFile);
 
 const app = express();
 
@@ -145,33 +149,82 @@ function authHeaders() {
   return {
     "Content-Type": "application/json",
     "Accept": "application/json",
+    "User-Agent": "curl/8.5.0",
     [APOLLO_AUTH_HEADER]: value
   };
 }
 
 async function apolloRequest(body) {
-  const response = await fetch(APOLLO_SEND_URL, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify(body)
-  });
-  const text = await response.text();
-  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+  const authValue = APOLLO_AUTH_PREFIX
+    ? `${APOLLO_AUTH_PREFIX} ${APOLLO_API_KEY}`
+    : APOLLO_API_KEY;
+
+  const marker = "__APOLLO_RESPONSE_META__";
+  const args = [
+    "--silent",
+    "--show-error",
+    "--location",
+    "--max-time", "30",
+    "--request", "POST",
+    APOLLO_SEND_URL,
+    "--header", "Content-Type: application/json",
+    "--header", "Accept: application/json",
+    "--header", `${APOLLO_AUTH_HEADER}: ${authValue}`,
+    "--data-binary", JSON.stringify(body),
+    "--write-out", `\n${marker}%{http_code}|%{content_type}`
+  ];
+
+  let stdout;
+  try {
+    const result = await execFileAsync("curl", args, {
+      maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true
+    });
+    stdout = String(result.stdout || "");
+  } catch (error) {
+    const stderr = String(error?.stderr || error?.message || "Falha desconhecida no curl").trim();
+    const curlError = new Error(`Falha ao chamar o Apollo pelo curl: ${stderr}`);
+    curlError.status = 502;
+    curlError.apollo = { stderr };
+    throw curlError;
+  }
+
+  const markerIndex = stdout.lastIndexOf(`\n${marker}`);
+  if (markerIndex < 0) {
+    const invalidError = new Error("Resposta inválida do Apollo: metadados HTTP não encontrados.");
+    invalidError.status = 502;
+    invalidError.apollo = { preview: stdout.slice(0, 500) };
+    throw invalidError;
+  }
+
+  const text = stdout.slice(0, markerIndex);
+  const meta = stdout.slice(markerIndex + marker.length + 1).trim();
+  const separatorIndex = meta.indexOf("|");
+  const status = Number(separatorIndex >= 0 ? meta.slice(0, separatorIndex) : meta) || 0;
+  const contentType = String(separatorIndex >= 0 ? meta.slice(separatorIndex + 1) : "").toLowerCase();
+
   let data = {};
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
   if (contentType.includes("text/html") || /^\s*<!doctype html/i.test(text)) {
-    const error = new Error(`O Apollo retornou uma página HTML/Cloudflare (HTTP ${response.status}) em vez de JSON.`);
-    error.status = response.status;
-    error.apollo = { contentType, preview: text.slice(0, 240) };
+    const error = new Error(`O Apollo retornou uma página HTML/Cloudflare (HTTP ${status}) em vez de JSON.`);
+    error.status = status || 502;
+    error.apollo = { contentType, preview: text.slice(0, 500) };
     throw error;
   }
-  if (!response.ok) {
-    const detail = data?.error?.message || data?.error || data?.message || `Erro HTTP ${response.status}`;
+
+  if (status < 200 || status >= 300) {
+    const detail = data?.error?.message || data?.error || data?.message || `Erro HTTP ${status}`;
     const error = new Error(String(detail));
-    error.status = response.status;
+    error.status = status || 502;
     error.apollo = data;
     throw error;
   }
+
   return data;
 }
 
