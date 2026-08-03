@@ -159,18 +159,19 @@ async function apolloRequest(body) {
     ? `${APOLLO_AUTH_PREFIX} ${APOLLO_API_KEY}`
     : APOLLO_API_KEY;
 
-  const marker = "__APOLLO_RESPONSE_META__";
+  const marker = "__APOLLO_META__";
   const args = [
+    "--http1.1",
     "--silent",
     "--show-error",
     "--location",
-    "--max-time", "30",
+    "--connect-timeout", "15",
+    "--max-time", "35",
     "--request", "POST",
     APOLLO_SEND_URL,
-    "--header", "Content-Type: application/json",
-    "--header", "Accept: application/json",
     "--header", `${APOLLO_AUTH_HEADER}: ${authValue}`,
-    "--data-binary", JSON.stringify(body),
+    "--header", "Content-Type: application/json",
+    "--data-raw", JSON.stringify(body),
     "--write-out", `\n${marker}%{http_code}|%{content_type}`
   ];
 
@@ -182,38 +183,44 @@ async function apolloRequest(body) {
     });
     stdout = String(result.stdout || "");
   } catch (error) {
-    const stderr = String(error?.stderr || error?.message || "Falha desconhecida no curl").trim();
-    const curlError = new Error(`Falha ao chamar o Apollo pelo curl: ${stderr}`);
+    const detail = String(error?.stderr || error?.message || "Falha desconhecida").trim();
+    const curlError = new Error(`Falha ao chamar o Apollo: ${detail}`);
     curlError.status = 502;
-    curlError.apollo = { stderr };
+    curlError.apollo = { detail };
     throw curlError;
   }
 
   const markerIndex = stdout.lastIndexOf(`\n${marker}`);
   if (markerIndex < 0) {
-    const invalidError = new Error("Resposta inválida do Apollo: metadados HTTP não encontrados.");
-    invalidError.status = 502;
-    invalidError.apollo = { preview: stdout.slice(0, 500) };
-    throw invalidError;
+    const error = new Error("O Apollo retornou uma resposta sem metadados HTTP.");
+    error.status = 502;
+    error.apollo = { preview: stdout.slice(0, 500) };
+    throw error;
   }
 
-  const text = stdout.slice(0, markerIndex);
+  const responseText = stdout.slice(0, markerIndex);
   const meta = stdout.slice(markerIndex + marker.length + 1).trim();
-  const separatorIndex = meta.indexOf("|");
-  const status = Number(separatorIndex >= 0 ? meta.slice(0, separatorIndex) : meta) || 0;
-  const contentType = String(separatorIndex >= 0 ? meta.slice(separatorIndex + 1) : "").toLowerCase();
+  const separator = meta.indexOf("|");
+  const status = Number(separator >= 0 ? meta.slice(0, separator) : meta) || 0;
+  const contentType = String(separator >= 0 ? meta.slice(separator + 1) : "").toLowerCase();
 
   let data = {};
   try {
-    data = text ? JSON.parse(text) : {};
+    data = responseText ? JSON.parse(responseText) : {};
   } catch {
-    data = { raw: text };
+    data = { raw: responseText };
   }
 
-  if (contentType.includes("text/html") || /^\s*<!doctype html/i.test(text)) {
-    const error = new Error(`O Apollo retornou uma página HTML/Cloudflare (HTTP ${status}) em vez de JSON.`);
-    error.status = status || 502;
-    error.apollo = { contentType, preview: text.slice(0, 500) };
+  if (contentType.includes("text/html") || /^\s*<!doctype html/i.test(responseText)) {
+    const error = new Error(
+      `O Cloudflare do Apollo bloqueou a saída do Render (HTTP ${status || "desconhecido"}).`
+    );
+    error.status = 502;
+    error.apollo = {
+      contentType,
+      preview: responseText.slice(0, 500),
+      diagnosis: "A mesma chamada funciona no Windows, mas o IP do Render recebe o desafio do Cloudflare."
+    };
     throw error;
   }
 
@@ -231,17 +238,28 @@ async function apolloRequest(body) {
 function buildApolloTextPayload(phone, message, replyToMessageId = null) {
   const to = normalizeBrazilianPhone(phone);
   const body = cleanMessage(message);
+
   if (APOLLO_PAYLOAD_MODE === "simple") {
-    return { to, phone: to, message: body, text: body, replyToMessageId: replyToMessageId || undefined };
+    return {
+      to,
+      phone: to,
+      message: body,
+      text: body,
+      replyToMessageId: replyToMessageId || undefined
+    };
   }
+
   const payload = {
     messaging_product: "whatsapp",
-    recipient_type: "individual",
     to,
     type: "text",
-    text: { preview_url: true, body }
+    text: { body }
   };
-  if (replyToMessageId) payload.context = { message_id: replyToMessageId };
+
+  if (replyToMessageId) {
+    payload.context = { message_id: replyToMessageId };
+  }
+
   return payload;
 }
 async function sendTextMessage(phone, message, replyToMessageId = null) {
@@ -254,20 +272,43 @@ function templateUsesImageHeader(templateName) {
 }
 function buildApolloTemplatePayload(phone, templateName, parameters = []) {
   const to = normalizeBrazilianPhone(phone);
+
   if (APOLLO_PAYLOAD_MODE === "simple") {
-    return { to, phone: to, type: "template", template: templateName, language: TEMPLATE_LANGUAGE, parameters };
+    return {
+      to,
+      phone: to,
+      type: "template",
+      template: templateName,
+      language: TEMPLATE_LANGUAGE,
+      parameters
+    };
   }
+
   const components = [];
+
   if (templateUsesImageHeader(templateName) && TEMPLATE_HEADER_IMAGE_URL) {
-    components.push({ type: "header", parameters: [{ type: "image", image: { link: TEMPLATE_HEADER_IMAGE_URL } }] });
+    components.push({
+      type: "header",
+      parameters: [{ type: "image", image: { link: TEMPLATE_HEADER_IMAGE_URL } }]
+    });
   }
-  if (parameters.length) components.push({ type: "body", parameters: parameters.map(templateTextParameter) });
+
+  if (parameters.length) {
+    components.push({
+      type: "body",
+      parameters: parameters.map(templateTextParameter)
+    });
+  }
+
   return {
     messaging_product: "whatsapp",
-    recipient_type: "individual",
     to,
     type: "template",
-    template: { name: templateName, language: { code: TEMPLATE_LANGUAGE }, components }
+    template: {
+      name: templateName,
+      language: { code: TEMPLATE_LANGUAGE },
+      components
+    }
   };
 }
 async function sendTemplateMessage(phone, templateName, parameters = []) {
