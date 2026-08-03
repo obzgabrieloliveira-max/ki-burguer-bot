@@ -145,7 +145,6 @@ function authHeaders() {
   return {
     "Content-Type": "application/json",
     "Accept": "application/json",
-    "User-Agent": "curl/8.5.0",
     [APOLLO_AUTH_HEADER]: value
   };
 }
