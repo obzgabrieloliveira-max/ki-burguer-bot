@@ -21,7 +21,6 @@ const APOLLO_API_KEY = String(process.env.APOLLO_API_KEY || "").trim();
 const APOLLO_AUTH_HEADER = String(process.env.APOLLO_AUTH_HEADER || "x-api-key").trim();
 const APOLLO_AUTH_PREFIX = String(process.env.APOLLO_AUTH_PREFIX || "").trim();
 const APOLLO_WEBHOOK_SECRET = String(process.env.APOLLO_WEBHOOK_SECRET || "").trim();
-const META_VERIFY_TOKEN = String(process.env.META_VERIFY_TOKEN || "").trim();
 const APOLLO_WEBHOOK_SECRET_HEADER = String(
   process.env.APOLLO_WEBHOOK_SECRET_HEADER || "x-webhook-secret"
 ).trim().toLowerCase();
@@ -37,6 +36,12 @@ const TEMPLATE_NAMES = {
   pedido_pix: String(process.env.TEMPLATE_PEDIDO_PIX || "pedido_pix1").trim(),
   pedido_em_preparo: String(process.env.TEMPLATE_PEDIDO_EM_PREPARO || "pedido_em_preparo").trim(),
   pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status1").trim(),
+  pedido_pagamento_confirmado: String(
+    process.env.TEMPLATE_PEDIDO_PAGAMENTO_CONFIRMADO || "pedido_pagamento_confirmado"
+  ).trim(),
+  pedido_saiu_entrega: String(
+    process.env.TEMPLATE_PEDIDO_SAIU_ENTREGA || "pedido_status1"
+  ).trim(),
   pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
@@ -375,11 +380,24 @@ function templateForOrderStatus(order, status) {
   const normalized = normalizeOrderStatus(status);
   const params = [orderName(order), orderNumber(order)];
   const map = {
-    aguardando_comprovante: TEMPLATE_NAMES.pedido_pix, pix_pendente: TEMPLATE_NAMES.pedido_pix,
-    novo: TEMPLATE_NAMES.pedido_em_preparo, recebido: TEMPLATE_NAMES.pedido_em_preparo,
-    pedido_recebido: TEMPLATE_NAMES.pedido_em_preparo, confirmado: TEMPLATE_NAMES.pedido_em_preparo,
-    preparo: TEMPLATE_NAMES.pedido_em_preparo, em_preparo: TEMPLATE_NAMES.pedido_em_preparo,
-    entregue: TEMPLATE_NAMES.pedido_entregue, concluido: TEMPLATE_NAMES.pedido_entregue,
+    aguardando_comprovante: TEMPLATE_NAMES.pedido_pix,
+    pix_pendente: TEMPLATE_NAMES.pedido_pix,
+
+    novo: TEMPLATE_NAMES.pedido_em_preparo,
+    recebido: TEMPLATE_NAMES.pedido_em_preparo,
+    pedido_recebido: TEMPLATE_NAMES.pedido_em_preparo,
+    confirmado: TEMPLATE_NAMES.pedido_em_preparo,
+    preparo: TEMPLATE_NAMES.pedido_em_preparo,
+    em_preparo: TEMPLATE_NAMES.pedido_em_preparo,
+
+    pagamento_confirmado: TEMPLATE_NAMES.pedido_pagamento_confirmado,
+
+    saiu_entrega: TEMPLATE_NAMES.pedido_saiu_entrega,
+    saiu_para_entrega: TEMPLATE_NAMES.pedido_saiu_entrega,
+
+    entregue: TEMPLATE_NAMES.pedido_entregue,
+    concluido: TEMPLATE_NAMES.pedido_entregue,
+
     cancelado: TEMPLATE_NAMES.pedido_cancelado
   };
   return map[normalized]
@@ -390,6 +408,15 @@ async function sendOrderTemplate(order, status) {
   const phone = orderPhone(order);
   if (!phone) throw new Error("O pedido não possui telefone.");
   const selected = templateForOrderStatus(order, status);
+
+  console.log("[template] tentativa", {
+    template: selected.name,
+    language: TEMPLATE_LANGUAGE,
+    status: normalizeOrderStatus(status),
+    phone: normalizeBrazilianPhone(phone),
+    parameters: selected.parameters
+  });
+
   const result = await sendTemplateMessage(phone, selected.name, selected.parameters);
   return { result, phone: normalizeBrazilianPhone(phone), template: selected.name, status: normalizeOrderStatus(status) };
 }
@@ -693,34 +720,8 @@ app.post("/shutdown", requireApiKey, (_req, res) => {
   res.json({ ok: true, message: "Servidor será encerrado." }); setTimeout(() => process.exit(0), 400);
 });
 
-// Verificação do webhook pela Meta.
-app.get("/webhook", (req, res) => {
-  const mode = String(req.query["hub.mode"] || "");
-  const token = String(req.query["hub.verify_token"] || "");
-  const challenge = String(req.query["hub.challenge"] || "");
-
-  if (mode === "subscribe" && META_VERIFY_TOKEN && token === META_VERIFY_TOKEN) {
-    console.log("Webhook verificado pela Meta.");
-    return res.status(200).send(challenge);
-  }
-
-  // Teste simples no navegador, sem parâmetros da Meta.
-  if (!mode && !token && !challenge) {
-    return res.status(200).json({
-      ok: true,
-      provider: "apollo",
-      message: "Webhook ativo"
-    });
-  }
-
-  console.warn("Falha na verificação do webhook da Meta.", {
-    mode,
-    tokenReceived: Boolean(token),
-    tokenConfigured: Boolean(META_VERIFY_TOKEN)
-  });
-
-  return res.status(403).send("Forbidden");
-});
+// Alguns painéis testam o webhook com GET.
+app.get("/webhook", (_req, res) => res.status(200).json({ ok: true, provider: "apollo", message: "Webhook ativo" }));
 app.post("/webhook", (req, res) => {
   if (!verifyApolloWebhook(req)) return res.status(401).json({ ok: false, error: "Segredo do webhook inválido." });
   res.sendStatus(200);
@@ -755,5 +756,4 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
-  console.log(`Token de verificação Meta: ${META_VERIFY_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
 });
