@@ -9,6 +9,7 @@ const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
 const app = express();
+const BUILD_VERSION = "status-fix-2026-08-03-v2";
 
 const PORT = Number(process.env.PORT || 3000);
 const API_KEY = String(process.env.BOT_API_KEY || "").trim();
@@ -36,6 +37,8 @@ const TEMPLATE_NAMES = {
   pedido_pix: String(process.env.TEMPLATE_PEDIDO_PIX || "pedido_pix1").trim(),
   pedido_em_preparo: String(process.env.TEMPLATE_PEDIDO_EM_PREPARO || "pedido_em_preparo").trim(),
   pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status1").trim(),
+  pedido_pagamento_confirmado: String(process.env.TEMPLATE_PEDIDO_PAGAMENTO_CONFIRMADO || "pedido_pagamento_confirmado").trim(),
+  pedido_saiu_entrega: String(process.env.TEMPLATE_PEDIDO_SAIU_ENTREGA || "pedido_status1").trim(),
   pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
@@ -320,7 +323,7 @@ function responseMessageId(result) {
 }
 
 function orderName(order) { return String(order?.name || order?.customer_name || order?.client_name || order?.nome || "Cliente").trim() || "Cliente"; }
-function orderNumber(order) { return String(order?.id || order?.order_id || order?.number || order?.numero || "novo").slice(0, 12); }
+function orderNumber(order) { return String(order?.daily_number ?? order?.numero_diario ?? order?.number ?? order?.numero ?? order?.order_id ?? order?.id ?? "novo").slice(0, 12); }
 function orderPhone(order) { return order?.phone || order?.telefone || order?.whatsapp || order?.customer_phone || order?.client_phone || order?.celular || ""; }
 function isPixPayment(order) {
   const payment = String(order?.payment_method || order?.payment || order?.forma_pagamento || "").toLowerCase();
@@ -340,15 +343,58 @@ function statusLabel(status) {
   };
   return labels[normalizeOrderStatus(status)] || String(status || "Atualizado").trim();
 }
+
+function statusTextMessage(order, status) {
+  const name = orderName(order);
+  const number = orderNumber(order);
+  const normalized = normalizeOrderStatus(status);
+
+  const messages = {
+    aguardando_comprovante:
+      `💳 Olá, ${name}! Recebemos o pedido #${number}. Envie o comprovante do PIX por esta conversa.`,
+    pagamento_confirmado:
+      `✅ Olá, ${name}! O pagamento do pedido #${number} foi confirmado e ele já está em preparo.`,
+    preparo:
+      `👨‍🍳 Olá, ${name}! O pedido #${number} já está sendo preparado.`,
+    em_preparo:
+      `👨‍🍳 Olá, ${name}! O pedido #${number} já está sendo preparado.`,
+    saiu_entrega:
+      `🛵 Olá, ${name}! O pedido #${number} saiu para entrega.`,
+    saiu_para_entrega:
+      `🛵 Olá, ${name}! O pedido #${number} saiu para entrega.`,
+    entregue:
+      `🎉 Olá, ${name}! O pedido #${number} foi entregue. Obrigado pela preferência!`,
+    concluido:
+      `🎉 Olá, ${name}! O pedido #${number} foi concluído. Obrigado pela preferência!`,
+    cancelado:
+      `❌ Olá, ${name}. O pedido #${number} foi cancelado.`
+  };
+
+  return messages[normalized] ||
+    `🍔 Olá, ${name}! O status do pedido #${number} foi atualizado para: ${statusLabel(status)}.`;
+}
 function templateForOrderStatus(order, status) {
   const normalized = normalizeOrderStatus(status);
   const params = [orderName(order), orderNumber(order)];
   const map = {
-    aguardando_comprovante: TEMPLATE_NAMES.pedido_pix, pix_pendente: TEMPLATE_NAMES.pedido_pix,
-    novo: TEMPLATE_NAMES.pedido_em_preparo, recebido: TEMPLATE_NAMES.pedido_em_preparo,
-    pedido_recebido: TEMPLATE_NAMES.pedido_em_preparo, confirmado: TEMPLATE_NAMES.pedido_em_preparo,
-    preparo: TEMPLATE_NAMES.pedido_em_preparo, em_preparo: TEMPLATE_NAMES.pedido_em_preparo,
-    entregue: TEMPLATE_NAMES.pedido_entregue, concluido: TEMPLATE_NAMES.pedido_entregue,
+    aguardando_comprovante: TEMPLATE_NAMES.pedido_pix,
+    pix_pendente: TEMPLATE_NAMES.pedido_pix,
+
+    novo: TEMPLATE_NAMES.pedido_em_preparo,
+    recebido: TEMPLATE_NAMES.pedido_em_preparo,
+    pedido_recebido: TEMPLATE_NAMES.pedido_em_preparo,
+    confirmado: TEMPLATE_NAMES.pedido_em_preparo,
+    preparo: TEMPLATE_NAMES.pedido_em_preparo,
+    em_preparo: TEMPLATE_NAMES.pedido_em_preparo,
+
+    pagamento_confirmado: TEMPLATE_NAMES.pedido_pagamento_confirmado,
+
+    saiu_entrega: TEMPLATE_NAMES.pedido_saiu_entrega,
+    saiu_para_entrega: TEMPLATE_NAMES.pedido_saiu_entrega,
+
+    entregue: TEMPLATE_NAMES.pedido_entregue,
+    concluido: TEMPLATE_NAMES.pedido_entregue,
+
     cancelado: TEMPLATE_NAMES.pedido_cancelado
   };
   return map[normalized]
@@ -359,6 +405,16 @@ async function sendOrderTemplate(order, status) {
   const phone = orderPhone(order);
   if (!phone) throw new Error("O pedido não possui telefone.");
   const selected = templateForOrderStatus(order, status);
+
+  console.log("[template] tentativa", {
+    build: BUILD_VERSION,
+    template: selected.name,
+    language: TEMPLATE_LANGUAGE,
+    status: normalizeOrderStatus(status),
+    phone: normalizeBrazilianPhone(phone),
+    parameters: selected.parameters
+  });
+
   const result = await sendTemplateMessage(phone, selected.name, selected.parameters);
   return { result, phone: normalizeBrazilianPhone(phone), template: selected.name, status: normalizeOrderStatus(status) };
 }
@@ -495,10 +551,10 @@ async function fetchMedia(message) {
   return { buffer: Buffer.from(await response.arrayBuffer()), contentType: response.headers.get("content-type") || message.mimeType || "application/octet-stream" };
 }
 
-app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", enabled: botEnabled, webhook: "/webhook" }));
+app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", build: BUILD_VERSION, enabled: botEnabled, webhook: "/webhook" }));
 app.get("/status", requireApiKey, (_req, res) => {
   const configured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
-  res.json({ ok: true, enabled: botEnabled, configured, ready: configured, state: configured ? "Apollo Gateway conectado" : "Não configurado", sent: botStats.sent, failed: botStats.failed, received: botStats.received, startedAt: botStats.startedAt, provider: "apollo" });
+  res.json({ ok: true, build: BUILD_VERSION, enabled: botEnabled, configured, ready: configured, state: configured ? "Apollo Gateway conectado" : "Não configurado", sent: botStats.sent, failed: botStats.failed, received: botStats.received, startedAt: botStats.startedAt, provider: "apollo" });
 });
 app.post("/toggle", requireApiKey, (req, res) => {
   if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ ok: false, error: 'Envie {"enabled": true} ou {"enabled": false}.' });
@@ -525,11 +581,82 @@ app.post("/order-created", requireApiKey, async (req, res) => {
   } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
 });
 app.post("/send-status", requireApiKey, async (req, res) => {
+  const order = req.body?.order || {};
+  const status = req.body?.status;
+  const phone = orderPhone(order);
+
+  console.log("[send-status] recebido", {
+    order: orderNumber(order),
+    phone: phone ? normalizeBrazilianPhone(phone) : "",
+    status: normalizeOrderStatus(status)
+  });
+
   try {
-    if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
-    const sent = await trackedSend(() => sendOrderTemplate(req.body?.order || {}, req.body?.status));
-    res.json({ ok: true, phone: sent.phone, template: sent.template, status: sent.status, messageId: responseMessageId(sent.result) });
-  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
+    if (!botEnabled) {
+      console.warn("[send-status] automação desligada");
+      return res.status(409).json({ ok: false, error: "A automação está desligada." });
+    }
+
+    const sent = await trackedSend(() => sendOrderTemplate(order, status));
+
+    console.log("[send-status] template enviado", {
+      order: orderNumber(order),
+      phone: sent.phone,
+      template: sent.template,
+      status: sent.status
+    });
+
+    return res.json({
+      ok: true,
+      mode: "template",
+      phone: sent.phone,
+      template: sent.template,
+      status: sent.status,
+      messageId: responseMessageId(sent.result)
+    });
+  } catch (templateError) {
+    console.error("[send-status] template falhou", {
+      order: orderNumber(order),
+      status: normalizeOrderStatus(status),
+      error: templateError.message,
+      details: templateError.apollo || null
+    });
+
+    try {
+      const normalizedPhone = normalizeBrazilianPhone(phone);
+      const message = statusTextMessage(order, status);
+      const result = await trackedSend(() => sendTextMessage(normalizedPhone, message));
+
+      console.log("[send-status] fallback em texto enviado", {
+        order: orderNumber(order),
+        phone: normalizedPhone,
+        status: normalizeOrderStatus(status)
+      });
+
+      return res.json({
+        ok: true,
+        mode: "text-fallback",
+        phone: normalizedPhone,
+        status: normalizeOrderStatus(status),
+        messageId: responseMessageId(result),
+        templateError: templateError.message
+      });
+    } catch (textError) {
+      console.error("[send-status] fallback em texto falhou", {
+        order: orderNumber(order),
+        status: normalizeOrderStatus(status),
+        error: textError.message,
+        details: textError.apollo || null
+      });
+
+      return res.status(textError.status || templateError.status || 500).json({
+        ok: false,
+        error: textError.message,
+        templateError: templateError.message,
+        details: textError.apollo || templateError.apollo || null
+      });
+    }
+  }
 });
 app.post("/send", requireApiKey, async (req, res) => {
   try {
@@ -621,6 +748,7 @@ app.use((error, _req, res, _next) => {
 });
 app.listen(PORT, "0.0.0.0", () => {
   console.log("==================================================");
+  console.log(` BUILD: ${BUILD_VERSION}`);
   console.log(" KI-BURGUER — APOLLO WHATSAPP GATEWAY");
   console.log("==================================================");
   console.log(`Servidor iniciado na porta ${PORT}`);
