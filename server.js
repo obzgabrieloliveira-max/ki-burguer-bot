@@ -142,7 +142,12 @@ async function trackedSend(task) {
 }
 function authHeaders() {
   const value = APOLLO_AUTH_PREFIX ? `${APOLLO_AUTH_PREFIX} ${APOLLO_API_KEY}` : APOLLO_API_KEY;
-  return { "Content-Type": "application/json", [APOLLO_AUTH_HEADER]: value };
+  return {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "curl/8.5.0",
+    [APOLLO_AUTH_HEADER]: value
+  };
 }
 
 async function apolloRequest(body) {
@@ -152,8 +157,15 @@ async function apolloRequest(body) {
     body: JSON.stringify(body)
   });
   const text = await response.text();
+  const contentType = String(response.headers.get("content-type") || "").toLowerCase();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+  if (contentType.includes("text/html") || /^\s*<!doctype html/i.test(text)) {
+    const error = new Error(`O Apollo retornou uma página HTML/Cloudflare (HTTP ${response.status}) em vez de JSON.`);
+    error.status = response.status;
+    error.apollo = { contentType, preview: text.slice(0, 240) };
+    throw error;
+  }
   if (!response.ok) {
     const detail = data?.error?.message || data?.error || data?.message || `Erro HTTP ${response.status}`;
     const error = new Error(String(detail));
