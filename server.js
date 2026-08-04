@@ -345,7 +345,12 @@ function templateUsesImageHeader(templateName) {
     TEMPLATE_NAMES.novo_site,
     TEMPLATE_NAMES.pedido_pix,
     TEMPLATE_NAMES.pedido_confirmado,
-    TEMPLATE_NAMES.pedido_cancelado
+    TEMPLATE_NAMES.pedido_cancelado,
+    TEMPLATE_NAMES.pedido_em_preparo,
+    TEMPLATE_NAMES.pedido_pagamento_confirmado,
+    TEMPLATE_NAMES.pedido_status,
+    TEMPLATE_NAMES.pedido_saiu_entrega,
+    TEMPLATE_NAMES.pedido_entregue
   ]).has(String(templateName || "").trim());
 }
 function buildApolloTemplatePayload(phone, templateName, parameters = []) {
