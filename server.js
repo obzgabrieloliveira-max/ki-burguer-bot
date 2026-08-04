@@ -406,8 +406,28 @@ function orderName(order) { return String(order?.name || order?.customer_name ||
 function orderNumber(order) { return String(order?.daily_number ?? order?.numero_diario ?? order?.number ?? order?.numero ?? order?.order_id ?? order?.id ?? "novo").slice(0, 12); }
 function orderPhone(order) { return order?.phone || order?.telefone || order?.whatsapp || order?.customer_phone || order?.client_phone || order?.celular || ""; }
 function isPixPayment(order) {
-  const payment = String(order?.payment_method || order?.payment || order?.forma_pagamento || "").toLowerCase();
-  return payment.includes("pix") && !payment.includes("maquininha");
+  const payment = String(
+    order?.payment_method ||
+    order?.payment ||
+    order?.forma_pagamento ||
+    order?.metodo_pagamento ||
+    ""
+  ).toLowerCase().trim();
+
+  if (
+    payment.includes("pix na maquininha") ||
+    payment.includes("maquininha pix") ||
+    (payment.includes("maquininha") && payment.includes("pix"))
+  ) {
+    return false;
+  }
+
+  return (
+    payment === "pix" ||
+    payment.startsWith("pix ") ||
+    payment.includes("pix antecipado") ||
+    payment.includes("pix chave")
+  );
 }
 
 function firstOrderValue(order, keys, fallback = "") {
