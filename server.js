@@ -670,16 +670,11 @@ function deliveryAddress(order) {
   return parts.join("\n") || "Endereço não informado";
 }
 
-function deliveryEstimate(order) {
-  return String(firstOrderValue(order, [
-    "delivery_estimate",
-    "estimated_delivery",
-    "previsao_entrega",
-    "estimate",
-    "tempo_estimado",
-    "delivery_time",
-    "tempo"
-  ], "Não informada")).trim();
+function deliveryEstimate(_order) {
+  return {
+    average: "30 minutos",
+    maximum: "70 minutos"
+  };
 }
 
 function paymentLabel(order) {
@@ -794,10 +789,23 @@ function buildCompleteOrderConfirmation(order) {
   const estimate = deliveryEstimate(order);
   const payment = paymentLabel(order);
   const details = paymentDetails(order);
-  const lines = [
+  const pix = isPixPayment(order);
+
+  const lines = [];
+
+  if (pix) {
+    lines.push(
+      "🚨 *ATENÇÃO: PAGAMENTO PIX PENDENTE* 🚨",
+      "",
+      "Para liberarmos o preparo, envie o comprovante do PIX respondendo esta conversa.",
+      ""
+    );
+  }
+
+  lines.push(
     `🍔 Olá, ${name}!`,
     "",
-    `✅ Seu pedido #${number} foi confirmado com sucesso.`,
+    `✅ Seu pedido #${number} foi recebido com sucesso.`,
     "",
     "🧾 *RESUMO DO PEDIDO*",
     "",
@@ -813,22 +821,41 @@ function buildCompleteOrderConfirmation(order) {
     `📍 ${type}:`,
     type === "Retirada no local" ? "Ki-Burguer" : deliveryAddress(order),
     "",
-    `⏱️ Previsão: ${estimate}`,
+    "⏱️ *PREVISÃO DE ENTREGA*",
+    `🕒 Em média: ${estimate.average}`,
+    `⏰ Tempo máximo estimado: ${estimate.maximum}`,
     "",
-    isPixPayment(order)
-      ? "Assim que confirmarmos o pagamento, seu pedido seguirá para o preparo. 👨‍🍳🔥"
-      : "Seu pedido já entrou na fila de preparo. 👨‍🍳🔥",
-    "",
-    "Avisaremos por aqui quando houver uma nova atualização.",
+    "Nos horários de maior movimento esse prazo pode variar um pouco, mas nossa equipe fará o possível para entregar o mais rápido possível. 🍔🚀",
+    ""
+  );
+
+  if (pix) {
+    lines.push(
+      "⏳ Seu pedido ficará aguardando a confirmação do PIX.",
+      "",
+      "🚨 *ENVIE O COMPROVANTE PARA INICIARMOS O PREPARO* 🚨",
+      "",
+      "Assim que o pagamento for confirmado, avisaremos você por aqui e o pedido seguirá para a fila de preparo. 👨‍🍳🔥"
+    );
+  } else {
+    lines.push(
+      "👨‍🍳 Seu pedido já entrou na fila de preparo.",
+      "",
+      "Avisaremos por aqui quando houver uma nova atualização."
+    );
+  }
+
+  lines.push(
     "",
     "Obrigado por escolher a Ki-Burguer! 💚"
-  ];
+  );
 
   return lines.filter((line, index, array) => {
     if (line !== "") return true;
     return index === 0 || array[index - 1] !== "";
   }).join("\n").trim();
 }
+
 function normalizeOrderStatus(status) {
   return String(status || "").trim().toLowerCase().normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "").replace(/[\s-]+/g, "_");
@@ -871,7 +898,19 @@ function statusTextMessage(order, status) {
     aguardando_comprovante:
       `💳✨ Olá, ${name}! O pedido #${number} foi recebido. Envie o comprovante do PIX por esta conversa para liberarmos o preparo. 🍔`,
     pagamento_confirmado:
-      `✅💚 Pagamento confirmado, ${name}! O pedido #${number} já está seguindo para o preparo. 👨‍🍳🔥`,
+      [
+        `✅💚 Pagamento PIX confirmado, ${name}!`,
+        ``,
+        `O pagamento do pedido #${number} foi aprovado com sucesso.`,
+        ``,
+        `👨‍🍳 Seu pedido já foi liberado e entrou na fila de preparo.`,
+        ``,
+        `⏱️ Previsão de entrega:`,
+        `🕒 Em média: 30 minutos`,
+        `⏰ Tempo máximo estimado: 70 minutos`,
+        ``,
+        `Avisaremos por aqui quando ele sair para entrega. 🛵💨`
+      ].join("\n"),
     preparo:
       `👨‍🍳🔥 Seu pedido #${number} já está sendo preparado com todo carinho, ${name}! Daqui a pouco tem novidade. 😋`,
     em_preparo:
