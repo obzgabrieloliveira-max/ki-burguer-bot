@@ -405,29 +405,117 @@ function responseMessageId(result) {
 function orderName(order) { return String(order?.name || order?.customer_name || order?.client_name || order?.nome || "Cliente").trim() || "Cliente"; }
 function orderNumber(order) { return String(order?.daily_number ?? order?.numero_diario ?? order?.number ?? order?.numero ?? order?.order_id ?? order?.id ?? "novo").slice(0, 12); }
 function orderPhone(order) { return order?.phone || order?.telefone || order?.whatsapp || order?.customer_phone || order?.client_phone || order?.celular || ""; }
-function isPixPayment(order) {
-  const payment = String(
+function paymentMethodRaw(order) {
+  return String(
     order?.payment_method ||
     order?.payment ||
     order?.forma_pagamento ||
     order?.metodo_pagamento ||
     ""
   ).toLowerCase().trim();
+}
 
-  if (
+function isPixMachinePayment(order) {
+  const payment = paymentMethodRaw(order);
+  return (
     payment.includes("pix na maquininha") ||
     payment.includes("maquininha pix") ||
     (payment.includes("maquininha") && payment.includes("pix"))
-  ) {
-    return false;
-  }
+  );
+}
 
+function isCombinedPayment(order) {
+  const payment = paymentMethodRaw(order);
+  return (
+    String(order?.payment_mode || "").toLowerCase() === "combine" ||
+    payment.includes("combinar meios") ||
+    payment.includes("pix + dinheiro") ||
+    payment.includes("pix + cartão") ||
+    payment.includes("pix + cartao") ||
+    payment.includes("dinheiro + cartão") ||
+    payment.includes("dinheiro + cartao")
+  );
+}
+
+function combinedPaymentHasPix(order) {
+  if (!isCombinedPayment(order)) return false;
+  if (isPixMachinePayment(order)) return false;
+
+  const combination = String(order?.payment_combination || "").toLowerCase();
+  const payment = paymentMethodRaw(order);
+
+  return (
+    combination === "pix_cash" ||
+    combination === "pix_card" ||
+    payment.includes("pix + dinheiro") ||
+    payment.includes("pix + cartão") ||
+    payment.includes("pix + cartao")
+  );
+}
+
+function isPixPayment(order) {
+  if (isPixMachinePayment(order)) return false;
+  if (combinedPaymentHasPix(order)) return true;
+
+  const payment = paymentMethodRaw(order);
   return (
     payment === "pix" ||
     payment.startsWith("pix ") ||
     payment.includes("pix antecipado") ||
     payment.includes("pix chave")
   );
+}
+
+function combinedPixAmount(order) {
+  const explicit = toNumber(
+    order?.payment_pix_amount ??
+    order?.pix_amount ??
+    order?.valor_pix ??
+    order?.pix_value ??
+    0
+  );
+
+  if (explicit > 0) return explicit;
+
+  if (!combinedPaymentHasPix(order)) {
+    return isPixPayment(order) ? orderTotals(order).total : 0;
+  }
+
+  return 0;
+}
+
+function combinedRemainingAmount(order) {
+  const explicit = toNumber(
+    order?.payment_remaining_amount ??
+    order?.remaining_amount ??
+    order?.valor_restante ??
+    0
+  );
+
+  if (explicit > 0) return explicit;
+
+  const total = orderTotals(order).total;
+  const pixAmount = combinedPixAmount(order);
+  return Math.max(0, total - pixAmount);
+}
+
+function combinedOtherMethod(order) {
+  const combination = String(order?.payment_combination || "").toLowerCase();
+  const payment = paymentMethodRaw(order);
+
+  if (combination === "pix_cash" || payment.includes("pix + dinheiro")) {
+    return "Dinheiro";
+  }
+
+  if (
+    combination === "pix_card" ||
+    payment.includes("pix + cartão") ||
+    payment.includes("pix + cartao")
+  ) {
+    return "Maquininha";
+  }
+
+  return "Outro meio";
 }
 
 function firstOrderValue(order, keys, fallback = "") {
@@ -707,6 +795,10 @@ function paymentLabel(order) {
 
   if (!raw) return "Não informado";
 
+  if (combinedPaymentHasPix(order)) {
+    return `Combinar meios — PIX + ${combinedOtherMethod(order)}`;
+  }
+
   const normalized = raw.toLowerCase();
 
   if (normalized.includes("pix") && normalized.includes("maquininha")) {
@@ -726,9 +818,41 @@ function paymentLabel(order) {
 
   return raw;
 }
-
 function paymentDetails(order) {
   const lines = [];
+
+  if (combinedPaymentHasPix(order)) {
+    const pixAmount = combinedPixAmount(order);
+    const remaining = combinedRemainingAmount(order);
+    const otherMethod = combinedOtherMethod(order);
+
+    lines.push(
+      `💠 Parte no PIX: ${pixAmount > 0 ? formatBRL(pixAmount) : "valor informado no pedido"}`,
+      `💵 Parte em ${otherMethod}: ${remaining > 0 ? formatBRL(remaining) : "valor restante"}`,
+      "📲 Envie o comprovante somente da parte paga no PIX."
+    );
+
+    if (otherMethod === "Dinheiro") {
+      const paidAmount = toNumber(firstOrderValue(order, [
+        "paid_amount",
+        "valor_pago",
+        "cash_received",
+        "valor_recebido"
+      ], 0));
+
+      const change = toNumber(firstOrderValue(order, [
+        "change",
+        "troco",
+        "change_amount",
+        "valor_troco"
+      ], 0));
+
+      if (paidAmount > 0) lines.push(`💵 Dinheiro recebido: ${formatBRL(paidAmount)}`);
+      if (change > 0) lines.push(`💰 Troco: ${formatBRL(change)}`);
+    }
+
+    return lines;
+  }
 
   const paidAmount = toNumber(firstOrderValue(order, [
     "paid_amount",
@@ -767,7 +891,6 @@ function paymentDetails(order) {
 
   return lines;
 }
-
 function orderTotals(order) {
   const items = orderItems(order);
 
@@ -814,10 +937,17 @@ function buildCompleteOrderConfirmation(order) {
   const lines = [];
 
   if (pix) {
+    const pixAmount = combinedPixAmount(order);
+    const combined = combinedPaymentHasPix(order);
+
     lines.push(
-      "🚨 *ATENÇÃO: PAGAMENTO PIX PENDENTE* 🚨",
+      combined
+        ? "🚨 *ATENÇÃO: PARTE DO PAGAMENTO PIX PENDENTE* 🚨"
+        : "🚨 *ATENÇÃO: PAGAMENTO PIX PENDENTE* 🚨",
       "",
-      "Para liberarmos o preparo, envie o comprovante do PIX respondendo esta conversa.",
+      combined
+        ? `Envie o comprovante da parte no PIX${pixAmount > 0 ? ` (${formatBRL(pixAmount)})` : ""}. A parte restante será paga em ${combinedOtherMethod(order)}.`
+        : "Para liberarmos o preparo, envie o comprovante do PIX respondendo esta conversa.",
       ""
     );
   }
@@ -851,9 +981,13 @@ function buildCompleteOrderConfirmation(order) {
 
   if (pix) {
     lines.push(
-      "⏳ Seu pedido ficará aguardando a confirmação do PIX.",
+      combinedPaymentHasPix(order)
+        ? "⏳ O pedido ficará aguardando somente a confirmação da parte paga no PIX."
+        : "⏳ Seu pedido ficará aguardando a confirmação do PIX.",
       "",
-      "🚨 *ENVIE O COMPROVANTE PARA INICIARMOS O PREPARO* 🚨",
+      combinedPaymentHasPix(order)
+        ? "🚨 *ENVIE O COMPROVANTE DA PARTE PIX PARA INICIARMOS O PREPARO* 🚨"
+        : "🚨 *ENVIE O COMPROVANTE PARA INICIARMOS O PREPARO* 🚨",
       "",
       "Assim que o pagamento for confirmado, avisaremos você por aqui e o pedido seguirá para a fila de preparo. 👨‍🍳🔥"
     );
