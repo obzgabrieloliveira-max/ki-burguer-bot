@@ -409,6 +409,426 @@ function isPixPayment(order) {
   const payment = String(order?.payment_method || order?.payment || order?.forma_pagamento || "").toLowerCase();
   return payment.includes("pix") && !payment.includes("maquininha");
 }
+
+function firstOrderValue(order, keys, fallback = "") {
+  for (const key of keys) {
+    const value = key.split(".").reduce((current, part) => current?.[part], order);
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return fallback;
+}
+
+function toNumber(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const normalized = String(value ?? "")
+    .replace(/[^\d,.-]/g, "")
+    .replace(/\.(?=\d{3}(?:\D|$))/g, "")
+    .replace(",", ".");
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatBRL(value) {
+  return toNumber(value).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL"
+  });
+}
+
+function orderItems(order) {
+  const raw = firstOrderValue(order, [
+    "items",
+    "itens",
+    "order_items",
+    "products",
+    "produtos",
+    "cart",
+    "carrinho"
+  ], []);
+
+  if (Array.isArray(raw)) return raw;
+
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return raw.trim() ? [{ name: raw.trim(), quantity: 1 }] : [];
+    }
+  }
+
+  return [];
+}
+
+function itemName(item) {
+  return String(
+    item?.name ||
+    item?.nome ||
+    item?.product_name ||
+    item?.title ||
+    item?.produto ||
+    "Item"
+  ).trim();
+}
+
+function itemQuantity(item) {
+  return Math.max(1, Number(
+    item?.quantity ||
+    item?.qty ||
+    item?.quantidade ||
+    item?.qtd ||
+    1
+  ) || 1);
+}
+
+function itemUnitPrice(item) {
+  return toNumber(
+    item?.unit_price ??
+    item?.price ??
+    item?.preco ??
+    item?.valor ??
+    item?.unitPrice ??
+    0
+  );
+}
+
+function itemTotal(item) {
+  const explicit = toNumber(
+    item?.total ??
+    item?.subtotal ??
+    item?.total_price ??
+    item?.valor_total ??
+    0
+  );
+  return explicit || itemUnitPrice(item) * itemQuantity(item);
+}
+
+function itemAddons(item) {
+  const raw =
+    item?.addons ??
+    item?.adicionais ??
+    item?.extras ??
+    item?.options ??
+    item?.opcoes ??
+    [];
+
+  if (Array.isArray(raw)) return raw;
+
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [raw];
+    } catch {
+      return raw.trim() ? [raw.trim()] : [];
+    }
+  }
+
+  return [];
+}
+
+function addonLabel(addon) {
+  if (typeof addon === "string") return addon.trim();
+
+  const name = String(
+    addon?.name ||
+    addon?.nome ||
+    addon?.title ||
+    addon?.label ||
+    "Adicional"
+  ).trim();
+
+  const quantity = Number(
+    addon?.quantity ||
+    addon?.qty ||
+    addon?.quantidade ||
+    1
+  ) || 1;
+
+  const price = toNumber(
+    addon?.price ??
+    addon?.preco ??
+    addon?.valor ??
+    0
+  );
+
+  return `${quantity > 1 ? `${quantity}x ` : ""}${name}${price > 0 ? ` (+${formatBRL(price)})` : ""}`;
+}
+
+function formatItemsBlock(order) {
+  const items = orderItems(order);
+
+  if (!items.length) return "• Itens não informados";
+
+  return items.map(item => {
+    const quantity = itemQuantity(item);
+    const name = itemName(item);
+    const total = itemTotal(item);
+    const addons = itemAddons(item)
+      .map(addonLabel)
+      .filter(Boolean);
+
+    const observations = String(
+      item?.observation ||
+      item?.observacao ||
+      item?.notes ||
+      item?.obs ||
+      ""
+    ).trim();
+
+    const lines = [
+      `• ${quantity}x ${name}${total > 0 ? ` — ${formatBRL(total)}` : ""}`
+    ];
+
+    for (const addon of addons) {
+      lines.push(`  ↳ ${addon}`);
+    }
+
+    if (observations) {
+      lines.push(`  📝 ${observations}`);
+    }
+
+    return lines.join("\n");
+  }).join("\n");
+}
+
+function deliveryType(order) {
+  const raw = String(firstOrderValue(order, [
+    "delivery_type",
+    "order_type",
+    "tipo",
+    "tipo_entrega",
+    "fulfillment",
+    "modo_entrega"
+  ], "")).toLowerCase();
+
+  if (raw.includes("retirada") || raw.includes("pickup") || raw.includes("balcao")) {
+    return "Retirada no local";
+  }
+
+  return "Entrega";
+}
+
+function deliveryAddress(order) {
+  const direct = String(firstOrderValue(order, [
+    "address",
+    "endereco",
+    "delivery_address",
+    "endereco_entrega",
+    "location",
+    "local_entrega"
+  ], "")).trim();
+
+  const street = String(firstOrderValue(order, [
+    "street",
+    "rua",
+    "address.street",
+    "endereco.rua"
+  ], "")).trim();
+
+  const number = String(firstOrderValue(order, [
+    "address_number",
+    "numero_endereco",
+    "number_address",
+    "address.number",
+    "endereco.numero"
+  ], "")).trim();
+
+  const neighborhood = String(firstOrderValue(order, [
+    "neighborhood",
+    "bairro",
+    "address.neighborhood",
+    "endereco.bairro"
+  ], "")).trim();
+
+  const city = String(firstOrderValue(order, [
+    "city",
+    "cidade",
+    "address.city",
+    "endereco.cidade"
+  ], "")).trim();
+
+  const reference = String(firstOrderValue(order, [
+    "reference",
+    "referencia",
+    "reference_point",
+    "ponto_referencia",
+    "address.reference",
+    "endereco.referencia"
+  ], "")).trim();
+
+  const parts = [];
+  if (direct) parts.push(direct);
+  else {
+    const firstLine = [street, number].filter(Boolean).join(", ");
+    const secondLine = [neighborhood, city].filter(Boolean).join(" — ");
+    if (firstLine) parts.push(firstLine);
+    if (secondLine) parts.push(secondLine);
+  }
+
+  if (reference) parts.push(`Referência: ${reference}`);
+
+  return parts.join("\n") || "Endereço não informado";
+}
+
+function deliveryEstimate(order) {
+  return String(firstOrderValue(order, [
+    "delivery_estimate",
+    "estimated_delivery",
+    "previsao_entrega",
+    "estimate",
+    "tempo_estimado",
+    "delivery_time",
+    "tempo"
+  ], "Não informada")).trim();
+}
+
+function paymentLabel(order) {
+  const raw = String(firstOrderValue(order, [
+    "payment_method",
+    "payment",
+    "forma_pagamento",
+    "metodo_pagamento"
+  ], "Não informado")).trim();
+
+  if (!raw) return "Não informado";
+
+  const normalized = raw.toLowerCase();
+
+  if (normalized.includes("pix") && normalized.includes("maquininha")) {
+    return "PIX na maquininha";
+  }
+  if (normalized.includes("pix")) return "PIX";
+  if (normalized.includes("dinheiro")) return "Dinheiro";
+  if (normalized.includes("credito") || normalized.includes("crédito")) {
+    return "Maquininha — Crédito";
+  }
+  if (normalized.includes("debito") || normalized.includes("débito")) {
+    return "Maquininha — Débito";
+  }
+  if (normalized.includes("maquininha") || normalized.includes("cartao") || normalized.includes("cartão")) {
+    return "Maquininha";
+  }
+
+  return raw;
+}
+
+function paymentDetails(order) {
+  const lines = [];
+
+  const paidAmount = toNumber(firstOrderValue(order, [
+    "paid_amount",
+    "valor_pago",
+    "cash_received",
+    "valor_recebido"
+  ], 0));
+
+  const change = toNumber(firstOrderValue(order, [
+    "change",
+    "troco",
+    "change_amount",
+    "valor_troco"
+  ], 0));
+
+  const cardType = String(firstOrderValue(order, [
+    "card_type",
+    "tipo_cartao",
+    "payment_detail",
+    "detalhe_pagamento"
+  ], "")).trim();
+
+  if (paymentLabel(order) === "Dinheiro") {
+    if (paidAmount > 0) lines.push(`💵 Valor recebido: ${formatBRL(paidAmount)}`);
+    if (change > 0) lines.push(`💰 Troco: ${formatBRL(change)}`);
+    else if (paidAmount > 0) lines.push("💰 Troco: sem troco");
+  }
+
+  if (paymentLabel(order).startsWith("Maquininha") && cardType) {
+    lines.push(`💳 Tipo: ${cardType}`);
+  }
+
+  if (isPixPayment(order)) {
+    lines.push("📲 Envie o comprovante respondendo esta conversa.");
+  }
+
+  return lines;
+}
+
+function orderTotals(order) {
+  const items = orderItems(order);
+
+  const calculatedSubtotal = items.reduce((sum, item) => sum + itemTotal(item), 0);
+
+  const subtotal = toNumber(firstOrderValue(order, [
+    "subtotal",
+    "subtotal_amount",
+    "valor_subtotal"
+  ], calculatedSubtotal));
+
+  const deliveryFee = toNumber(firstOrderValue(order, [
+    "delivery_fee",
+    "shipping_fee",
+    "taxa_entrega",
+    "frete",
+    "delivery_cost"
+  ], 0));
+
+  const total = toNumber(firstOrderValue(order, [
+    "total",
+    "total_amount",
+    "valor_total",
+    "grand_total"
+  ], subtotal + deliveryFee));
+
+  return {
+    subtotal,
+    deliveryFee,
+    total: total || subtotal + deliveryFee
+  };
+}
+
+function buildCompleteOrderConfirmation(order) {
+  const name = orderName(order);
+  const number = orderNumber(order);
+  const totals = orderTotals(order);
+  const type = deliveryType(order);
+  const estimate = deliveryEstimate(order);
+  const payment = paymentLabel(order);
+  const details = paymentDetails(order);
+  const lines = [
+    `🍔 Olá, ${name}!`,
+    "",
+    `✅ Seu pedido #${number} foi confirmado com sucesso.`,
+    "",
+    "🧾 *RESUMO DO PEDIDO*",
+    "",
+    formatItemsBlock(order),
+    "",
+    `💰 Subtotal: ${formatBRL(totals.subtotal)}`,
+    `🚚 Taxa de entrega: ${totals.deliveryFee > 0 ? formatBRL(totals.deliveryFee) : "Grátis"}`,
+    `💵 *Total do pedido: ${formatBRL(totals.total)}*`,
+    "",
+    `💳 Forma de pagamento: ${payment}`,
+    ...details,
+    "",
+    `📍 ${type}:`,
+    type === "Retirada no local" ? "Ki-Burguer" : deliveryAddress(order),
+    "",
+    `⏱️ Previsão: ${estimate}`,
+    "",
+    isPixPayment(order)
+      ? "Assim que confirmarmos o pagamento, seu pedido seguirá para o preparo. 👨‍🍳🔥"
+      : "Seu pedido já entrou na fila de preparo. 👨‍🍳🔥",
+    "",
+    "Avisaremos por aqui quando houver uma nova atualização.",
+    "",
+    "Obrigado por escolher a Ki-Burguer! 💚"
+  ];
+
+  return lines.filter((line, index, array) => {
+    if (line !== "") return true;
+    return index === 0 || array[index - 1] !== "";
+  }).join("\n").trim();
+}
 function normalizeOrderStatus(status) {
   return String(status || "").trim().toLowerCase().normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "").replace(/[\s-]+/g, "_");
@@ -425,34 +845,7 @@ function statusLabel(status) {
 }
 
 function initialOrderMessage(order) {
-  const name = orderName(order);
-  const number = orderNumber(order);
-
-  if (isPixPayment(order)) {
-    return [
-      `🍔✨ Olá, ${name}!`,
-      ``,
-      `Recebemos o seu pedido #${number} com sucesso!`,
-      ``,
-      `💳 Para confirmar o pagamento via PIX, envie o comprovante respondendo esta conversa.`,
-      ``,
-      `Assim que confirmarmos, o pedido seguirá direto para o preparo. 😋🔥`,
-      ``,
-      `Obrigado por escolher a Ki-Burguer! 💚`
-    ].join("\n");
-  }
-
-  return [
-    `🍔🎉 Olá, ${name}!`,
-    ``,
-    `Seu pedido #${number} foi confirmado com sucesso! ✅`,
-    ``,
-    `👨‍🍳 Nossa equipe já recebeu o pedido e ele entrou na fila de preparo.`,
-    ``,
-    `Em breve você receberá novas atualizações por aqui. 😋🔥`,
-    ``,
-    `Obrigado por escolher a Ki-Burguer! 💚`
-  ].join("\n");
+  return buildCompleteOrderConfirmation(order);
 }
 
 function initialOrderTemplate(order) {
@@ -832,7 +1225,10 @@ app.post("/order-created", requireApiKey, async (req, res) => {
     console.log("[order-created] tentando mensagem comum", {
       order: orderNumber(order),
       phone,
-      payment: isPixPayment(order) ? "pix" : "outros"
+      payment: isPixPayment(order) ? "pix" : "outros",
+      items: orderItems(order).length,
+      total: orderTotals(order).total,
+      deliveryFee: orderTotals(order).deliveryFee
     });
 
     try {
