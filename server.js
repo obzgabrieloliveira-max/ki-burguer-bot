@@ -21,6 +21,7 @@ const APOLLO_API_KEY = String(process.env.APOLLO_API_KEY || "").trim();
 const APOLLO_AUTH_HEADER = String(process.env.APOLLO_AUTH_HEADER || "x-api-key").trim();
 const APOLLO_AUTH_PREFIX = String(process.env.APOLLO_AUTH_PREFIX || "").trim();
 const APOLLO_WEBHOOK_SECRET = String(process.env.APOLLO_WEBHOOK_SECRET || "").trim();
+const META_VERIFY_TOKEN = String(process.env.META_VERIFY_TOKEN || "").trim();
 const APOLLO_WEBHOOK_SECRET_HEADER = String(
   process.env.APOLLO_WEBHOOK_SECRET_HEADER || "x-webhook-secret"
 ).trim().toLowerCase();
@@ -36,6 +37,9 @@ const TEMPLATE_NAMES = {
   pedido_pix: String(process.env.TEMPLATE_PEDIDO_PIX || "pedido_pix1").trim(),
   pedido_em_preparo: String(process.env.TEMPLATE_PEDIDO_EM_PREPARO || "pedido_em_preparo").trim(),
   pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status1").trim(),
+  pedido_confirmado: String(
+    process.env.TEMPLATE_PEDIDO_CONFIRMADO || "pedido_confirmado"
+  ).trim(),
   pedido_pagamento_confirmado: String(
     process.env.TEMPLATE_PEDIDO_PAGAMENTO_CONFIRMADO || "pedido_pagamento_confirmado"
   ).trim(),
@@ -45,6 +49,11 @@ const TEMPLATE_NAMES = {
   pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
+const AUTO_MESSAGE_IMAGE_URL = String(
+  process.env.AUTO_MESSAGE_IMAGE_URL ||
+  process.env.META_TEMPLATE_HEADER_IMAGE_URL ||
+  "https://ki-cardapio.netlify.app/meta-header.jpg"
+).trim();
 
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
   process.env.HUMAN_SUPPORT_BUTTON_TEXT || "Falar com Atendente"
@@ -271,10 +280,73 @@ function buildApolloTextPayload(phone, message, replyToMessageId = null) {
 async function sendTextMessage(phone, message, replyToMessageId = null) {
   return apolloRequest(buildApolloTextPayload(phone, message, replyToMessageId));
 }
+
+function buildApolloImagePayload(phone, imageUrl, caption = "", replyToMessageId = null) {
+  const to = normalizeBrazilianPhone(phone);
+  const link = String(imageUrl || "").trim();
+  const text = String(caption || "").trim();
+
+  if (!/^https:\/\/\S+$/i.test(link)) {
+    throw new Error("A URL da imagem automática não é válida.");
+  }
+
+  if (APOLLO_PAYLOAD_MODE === "simple") {
+    return {
+      to,
+      phone: to,
+      type: "image",
+      image: link,
+      imageUrl: link,
+      mediaUrl: link,
+      caption: text,
+      message: text,
+      replyToMessageId: replyToMessageId || undefined
+    };
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "image",
+    image: {
+      link,
+      caption: text
+    }
+  };
+
+  if (replyToMessageId) {
+    payload.context = { message_id: replyToMessageId };
+  }
+
+  return payload;
+}
+
+async function sendImageMessage(phone, imageUrl, caption = "", replyToMessageId = null) {
+  return apolloRequest(
+    buildApolloImagePayload(phone, imageUrl, caption, replyToMessageId)
+  );
+}
+
+async function sendDecoratedMessage(phone, message, replyToMessageId = null) {
+  if (AUTO_MESSAGE_IMAGE_URL) {
+    return sendImageMessage(
+      phone,
+      AUTO_MESSAGE_IMAGE_URL,
+      message,
+      replyToMessageId
+    );
+  }
+
+  return sendTextMessage(phone, message, replyToMessageId);
+}
 function templateTextParameter(value) { return { type: "text", text: String(value ?? "").trim() || "-" }; }
 function templateUsesImageHeader(templateName) {
-  return new Set([TEMPLATE_NAMES.novo_site, TEMPLATE_NAMES.pedido_pix, TEMPLATE_NAMES.pedido_cancelado])
-    .has(String(templateName || "").trim());
+  return new Set([
+    TEMPLATE_NAMES.novo_site,
+    TEMPLATE_NAMES.pedido_pix,
+    TEMPLATE_NAMES.pedido_confirmado,
+    TEMPLATE_NAMES.pedido_cancelado
+  ]).has(String(templateName || "").trim());
 }
 function buildApolloTemplatePayload(phone, templateName, parameters = []) {
   const to = normalizeBrazilianPhone(phone);
@@ -347,6 +419,51 @@ function statusLabel(status) {
   return labels[normalizeOrderStatus(status)] || String(status || "Atualizado").trim();
 }
 
+function initialOrderMessage(order) {
+  const name = orderName(order);
+  const number = orderNumber(order);
+
+  if (isPixPayment(order)) {
+    return [
+      `🍔✨ Olá, ${name}!`,
+      ``,
+      `Recebemos o seu pedido #${number} com sucesso!`,
+      ``,
+      `💳 Para confirmar o pagamento via PIX, envie o comprovante respondendo esta conversa.`,
+      ``,
+      `Assim que confirmarmos, o pedido seguirá direto para o preparo. 😋🔥`,
+      ``,
+      `Obrigado por escolher a Ki-Burguer! 💚`
+    ].join("\\n");
+  }
+
+  return [
+    `🍔🎉 Olá, ${name}!`,
+    ``,
+    `Seu pedido #${number} foi confirmado com sucesso! ✅`,
+    ``,
+    `👨‍🍳 Nossa equipe já recebeu o pedido e ele entrou na fila de preparo.`,
+    ``,
+    `Em breve você receberá novas atualizações por aqui. 😋🔥`,
+    ``,
+    `Obrigado por escolher a Ki-Burguer! 💚`
+  ].join("\\n");
+}
+
+function initialOrderTemplate(order) {
+  if (isPixPayment(order)) {
+    return {
+      name: TEMPLATE_NAMES.pedido_pix,
+      parameters: [orderName(order), orderNumber(order)]
+    };
+  }
+
+  return {
+    name: TEMPLATE_NAMES.pedido_confirmado,
+    parameters: [orderName(order), orderNumber(order)]
+  };
+}
+
 function statusTextMessage(order, status) {
   const name = orderName(order);
   const number = orderNumber(order);
@@ -354,23 +471,23 @@ function statusTextMessage(order, status) {
 
   const messages = {
     aguardando_comprovante:
-      `💳 Olá, ${name}! Recebemos o pedido #${number}. Envie o comprovante do PIX por esta conversa.`,
+      `💳✨ Olá, ${name}! O pedido #${number} foi recebido. Envie o comprovante do PIX por esta conversa para liberarmos o preparo. 🍔`,
     pagamento_confirmado:
-      `✅ Olá, ${name}! O pagamento do pedido #${number} foi confirmado e ele já está em preparo.`,
+      `✅💚 Pagamento confirmado, ${name}! O pedido #${number} já está seguindo para o preparo. 👨‍🍳🔥`,
     preparo:
-      `👨‍🍳 Olá, ${name}! O pedido #${number} já está sendo preparado.`,
+      `👨‍🍳🔥 Seu pedido #${number} já está sendo preparado com todo carinho, ${name}! Daqui a pouco tem novidade. 😋`,
     em_preparo:
-      `👨‍🍳 Olá, ${name}! O pedido #${number} já está sendo preparado.`,
+      `👨‍🍳🔥 Seu pedido #${number} já está sendo preparado com todo carinho, ${name}! Daqui a pouco tem novidade. 😋`,
     saiu_entrega:
-      `🛵 Olá, ${name}! O pedido #${number} saiu para entrega.`,
+      `🛵💨 Boa notícia, ${name}! O pedido #${number} saiu para entrega e já está a caminho. 🍔`,
     saiu_para_entrega:
-      `🛵 Olá, ${name}! O pedido #${number} saiu para entrega.`,
+      `🛵💨 Boa notícia, ${name}! O pedido #${number} saiu para entrega e já está a caminho. 🍔`,
     entregue:
-      `🎉 Olá, ${name}! O pedido #${number} foi entregue. Obrigado pela preferência!`,
+      `🎉🍔 Pedido #${number} entregue, ${name}! Esperamos que aproveite muito. Obrigado por escolher a Ki-Burguer! 💚`,
     concluido:
-      `🎉 Olá, ${name}! O pedido #${number} foi concluído. Obrigado pela preferência!`,
+      `🎉🍔 Pedido #${number} concluído, ${name}! Esperamos que aproveite muito. Obrigado por escolher a Ki-Burguer! 💚`,
     cancelado:
-      `❌ Olá, ${name}. O pedido #${number} foi cancelado.`
+      `❌ Olá, ${name}. O pedido #${number} foi cancelado. Caso precise de ajuda, responda esta conversa.`
   };
 
   return messages[normalized] ||
@@ -575,12 +692,93 @@ app.post("/send-new-site", requireApiKey, async (req, res) => {
   } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
 });
 app.post("/order-created", requireApiKey, async (req, res) => {
+  const order = req.body?.order || req.body;
+  const rawPhone = orderPhone(order);
+
   try {
-    if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
-    const order = req.body?.order || req.body;
-    const sent = await trackedSend(() => sendOrderTemplate(order, isPixPayment(order) ? "aguardando_comprovante" : "preparo"));
-    res.json({ ok: true, phone: sent.phone, template: sent.template, status: sent.status, messageId: responseMessageId(sent.result) });
-  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
+    if (!botEnabled) {
+      return res.status(409).json({
+        ok: false,
+        error: "A automação está desligada."
+      });
+    }
+
+    const phone = normalizeBrazilianPhone(rawPhone);
+    const message = initialOrderMessage(order);
+
+    console.log("[order-created] tentando mensagem comum", {
+      order: orderNumber(order),
+      phone,
+      payment: isPixPayment(order) ? "pix" : "outros"
+    });
+
+    try {
+      const result = await trackedSend(() =>
+        sendDecoratedMessage(phone, message)
+      );
+
+      console.log("[order-created] mensagem comum enviada", {
+        order: orderNumber(order),
+        phone,
+        media: AUTO_MESSAGE_IMAGE_URL ? "image" : "text"
+      });
+
+      return res.json({
+        ok: true,
+        mode: AUTO_MESSAGE_IMAGE_URL
+          ? "normal-image-message"
+          : "normal-message",
+        phone,
+        messageId: responseMessageId(result)
+      });
+    } catch (normalError) {
+      console.warn(
+        "[order-created] mensagem comum falhou; tentando template",
+        {
+          order: orderNumber(order),
+          phone,
+          error: normalError.message,
+          details: normalError.apollo || null
+        }
+      );
+
+      const selected = initialOrderTemplate(order);
+      const result = await trackedSend(() =>
+        sendTemplateMessage(
+          phone,
+          selected.name,
+          selected.parameters
+        )
+      );
+
+      console.log("[order-created] template enviado", {
+        order: orderNumber(order),
+        phone,
+        template: selected.name
+      });
+
+      return res.json({
+        ok: true,
+        mode: "template-fallback",
+        phone,
+        template: selected.name,
+        messageId: responseMessageId(result),
+        normalMessageError: normalError.message
+      });
+    }
+  } catch (error) {
+    console.error("[order-created] falha total", {
+      order: orderNumber(order),
+      error: error.message,
+      details: error.apollo || null
+    });
+
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message,
+      details: error.apollo
+    });
+  }
 });
 app.post("/send-status", requireApiKey, async (req, res) => {
   const order = req.body?.order || {};
@@ -595,69 +793,47 @@ app.post("/send-status", requireApiKey, async (req, res) => {
 
   try {
     if (!botEnabled) {
-      console.warn("[send-status] automação desligada");
-      return res.status(409).json({ ok: false, error: "A automação está desligada." });
+      return res.status(409).json({
+        ok: false,
+        error: "A automação está desligada."
+      });
     }
 
-    const sent = await trackedSend(() => sendOrderTemplate(order, status));
+    const normalizedPhone = normalizeBrazilianPhone(phone);
+    const message = statusTextMessage(order, status);
+    const result = await trackedSend(() =>
+      sendDecoratedMessage(normalizedPhone, message)
+    );
 
-    console.log("[send-status] template enviado", {
+    console.log("[send-status] mensagem automática enviada", {
       order: orderNumber(order),
-      phone: sent.phone,
-      template: sent.template,
-      status: sent.status
+      phone: normalizedPhone,
+      status: normalizeOrderStatus(status),
+      media: AUTO_MESSAGE_IMAGE_URL ? "image" : "text"
     });
 
     return res.json({
       ok: true,
-      mode: "template",
-      phone: sent.phone,
-      template: sent.template,
-      status: sent.status,
-      messageId: responseMessageId(sent.result)
+      mode: AUTO_MESSAGE_IMAGE_URL
+        ? "normal-image-message"
+        : "normal-message",
+      phone: normalizedPhone,
+      status: normalizeOrderStatus(status),
+      messageId: responseMessageId(result)
     });
-  } catch (templateError) {
-    console.error("[send-status] template falhou", {
+  } catch (error) {
+    console.error("[send-status] mensagem automática falhou", {
       order: orderNumber(order),
       status: normalizeOrderStatus(status),
-      error: templateError.message,
-      details: templateError.apollo || null
+      error: error.message,
+      details: error.apollo || null
     });
 
-    try {
-      const normalizedPhone = normalizeBrazilianPhone(phone);
-      const message = statusTextMessage(order, status);
-      const result = await trackedSend(() => sendTextMessage(normalizedPhone, message));
-
-      console.log("[send-status] fallback em texto enviado", {
-        order: orderNumber(order),
-        phone: normalizedPhone,
-        status: normalizeOrderStatus(status)
-      });
-
-      return res.json({
-        ok: true,
-        mode: "text-fallback",
-        phone: normalizedPhone,
-        status: normalizeOrderStatus(status),
-        messageId: responseMessageId(result),
-        templateError: templateError.message
-      });
-    } catch (textError) {
-      console.error("[send-status] fallback em texto falhou", {
-        order: orderNumber(order),
-        status: normalizeOrderStatus(status),
-        error: textError.message,
-        details: textError.apollo || null
-      });
-
-      return res.status(textError.status || templateError.status || 500).json({
-        ok: false,
-        error: textError.message,
-        templateError: templateError.message,
-        details: textError.apollo || templateError.apollo || null
-      });
-    }
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message,
+      details: error.apollo
+    });
   }
 });
 app.post("/send", requireApiKey, async (req, res) => {
@@ -720,8 +896,31 @@ app.post("/shutdown", requireApiKey, (_req, res) => {
   res.json({ ok: true, message: "Servidor será encerrado." }); setTimeout(() => process.exit(0), 400);
 });
 
-// Alguns painéis testam o webhook com GET.
-app.get("/webhook", (_req, res) => res.status(200).json({ ok: true, provider: "apollo", message: "Webhook ativo" }));
+// Verificação do webhook pela Meta e teste simples do Apollo.
+app.get("/webhook", (req, res) => {
+  const mode = String(req.query["hub.mode"] || "");
+  const token = String(req.query["hub.verify_token"] || "");
+  const challenge = String(req.query["hub.challenge"] || "");
+
+  if (
+    mode === "subscribe" &&
+    META_VERIFY_TOKEN &&
+    token === META_VERIFY_TOKEN
+  ) {
+    console.log("Webhook verificado pela Meta.");
+    return res.status(200).send(challenge);
+  }
+
+  if (!mode && !token && !challenge) {
+    return res.status(200).json({
+      ok: true,
+      provider: "apollo",
+      message: "Webhook ativo"
+    });
+  }
+
+  return res.status(403).send("Forbidden");
+});
 app.post("/webhook", (req, res) => {
   if (!verifyApolloWebhook(req)) return res.status(401).json({ ok: false, error: "Segredo do webhook inválido." });
   res.sendStatus(200);
@@ -735,10 +934,10 @@ app.post("/webhook", (req, res) => {
         console.log(`Webhook Apollo: ${message.direction} ${message.type} ${message.from || "sem número"}`);
         if (message.direction === "outgoing" || !message.from || !botEnabled) return;
         if (isHumanSupportRequest(message)) {
-          await trackedSend(() => sendTextMessage(message.from, HUMAN_SUPPORT_REPLY, message.id));
+          await trackedSend(() => sendDecoratedMessage(message.from, HUMAN_SUPPORT_REPLY, message.id));
           return;
         }
-        await trackedSend(() => sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
+        await trackedSend(() => sendDecoratedMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
       } catch (error) { console.error("Erro ao processar webhook Apollo:", error.apollo || error); }
     });
   }
@@ -756,4 +955,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
+  console.log(`Imagem automática: ${AUTO_MESSAGE_IMAGE_URL || "DESATIVADA"}`);
+  console.log(`Token de verificação Meta: ${META_VERIFY_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
 });
