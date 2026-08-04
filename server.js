@@ -30,15 +30,20 @@ const APOLLO_PAYLOAD_MODE = String(
 ).trim().toLowerCase();
 const APOLLO_MEDIA_URL_TEMPLATE = String(process.env.APOLLO_MEDIA_URL_TEMPLATE || "").trim();
 
+// Meta WhatsApp Cloud API — usada diretamente para templates fora da janela de 24 horas.
+const GRAPH_API_VERSION = String(process.env.GRAPH_API_VERSION || "v26.0").trim();
+const META_ACCESS_TOKEN = String(process.env.META_ACCESS_TOKEN || "").trim();
+const META_PHONE_NUMBER_ID = String(process.env.META_PHONE_NUMBER_ID || "").trim();
+
 const TEMPLATE_LANGUAGE = String(process.env.META_TEMPLATE_LANGUAGE || "pt_BR").trim();
 const TEMPLATE_NAMES = {
-  novo_site: String(process.env.TEMPLATE_NOVO_SITE || "novo_site_kiburguer").trim(),
+  novo_site: String(process.env.TEMPLATE_NOVO_SITE || "boas_vindas_kiburguer").trim(),
   pedido_cancelado: String(process.env.TEMPLATE_PEDIDO_CANCELADO || "pedido_cancelado1").trim(),
   pedido_pix: String(process.env.TEMPLATE_PEDIDO_PIX || "pedido_pix1").trim(),
   pedido_em_preparo: String(process.env.TEMPLATE_PEDIDO_EM_PREPARO || "pedido_em_preparo").trim(),
-  pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "pedido_status1").trim(),
+  pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "status_do_pedido1").trim(),
   pedido_confirmado: String(
-    process.env.TEMPLATE_PEDIDO_CONFIRMADO || "pedido_confirmado"
+    process.env.TEMPLATE_PEDIDO_CONFIRMADO || "pedido_pagamento_confirmado"
   ).trim(),
   pedido_pagamento_confirmado: String(
     process.env.TEMPLATE_PEDIDO_PAGAMENTO_CONFIRMADO || "pedido_pagamento_confirmado"
@@ -128,6 +133,8 @@ function validateConfiguration() {
   if (!API_KEY || API_KEY === "troque-por-uma-senha-forte") missing.push("BOT_API_KEY");
   if (!APOLLO_SEND_URL) missing.push("APOLLO_SEND_URL");
   if (!APOLLO_API_KEY) missing.push("APOLLO_API_KEY");
+  if (!META_ACCESS_TOKEN) missing.push("META_ACCESS_TOKEN");
+  if (!META_PHONE_NUMBER_ID) missing.push("META_PHONE_NUMBER_ID");
   if (missing.length) {
     console.error(`\nERRO: configure no Render/.env: ${missing.join(", ")}\n`);
     process.exit(1);
@@ -385,7 +392,13 @@ async function sendDecoratedMessage(phone, message, replyToMessageId = null) {
 
   return sendTextMessage(phone, message, replyToMessageId);
 }
-function templateTextParameter(value) { return { type: "text", text: String(value ?? "").trim() || "-" }; }
+function templateTextParameter(value) {
+  return {
+    type: "text",
+    text: String(value ?? "").trim() || "-"
+  };
+}
+
 function templateUsesImageHeader(templateName) {
   return new Set([
     TEMPLATE_NAMES.novo_site,
@@ -399,26 +412,22 @@ function templateUsesImageHeader(templateName) {
     TEMPLATE_NAMES.pedido_entregue
   ]).has(String(templateName || "").trim());
 }
-function buildApolloTemplatePayload(phone, templateName, parameters = []) {
+
+function buildMetaTemplatePayload(phone, templateName, parameters = []) {
   const to = normalizeBrazilianPhone(phone);
-
-  if (APOLLO_PAYLOAD_MODE === "simple") {
-    return {
-      to,
-      phone: to,
-      type: "template",
-      template: templateName,
-      language: TEMPLATE_LANGUAGE,
-      parameters
-    };
-  }
-
   const components = [];
 
   if (templateUsesImageHeader(templateName) && TEMPLATE_HEADER_IMAGE_URL) {
     components.push({
       type: "header",
-      parameters: [{ type: "image", image: { link: TEMPLATE_HEADER_IMAGE_URL } }]
+      parameters: [
+        {
+          type: "image",
+          image: {
+            link: TEMPLATE_HEADER_IMAGE_URL
+          }
+        }
+      ]
     });
   }
 
@@ -431,19 +440,109 @@ function buildApolloTemplatePayload(phone, templateName, parameters = []) {
 
   return {
     messaging_product: "whatsapp",
+    recipient_type: "individual",
     to,
     type: "template",
     template: {
-      name: templateName,
-      language: { code: TEMPLATE_LANGUAGE },
+      name: String(templateName || "").trim(),
+      language: {
+        policy: "deterministic",
+        code: TEMPLATE_LANGUAGE
+      },
       components
     }
   };
 }
-async function sendTemplateMessage(phone, templateName, parameters = []) {
-  if (!templateName) throw new Error("Nome do modelo de mensagem não configurado.");
-  return apolloRequest(buildApolloTemplatePayload(phone, templateName, parameters));
+
+async function metaRequest(path, body) {
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${path.replace(/^\/+/, "")}`;
+
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${META_ACCESS_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (networkError) {
+    const error = new Error(`Falha de rede ao chamar a Meta: ${networkError.message}`);
+    error.status = 502;
+    error.meta = {
+      networkError: networkError.message
+    };
+    throw error;
+  }
+
+  const responseText = await response.text();
+  let data = {};
+
+  try {
+    data = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    data = {
+      raw: responseText
+    };
+  }
+
+  if (!response.ok) {
+    const metaError = data?.error || {};
+    const error = new Error(
+      metaError?.error_user_msg ||
+      metaError?.message ||
+      `Erro HTTP ${response.status} ao chamar a Meta`
+    );
+
+    error.status = response.status || 502;
+    error.meta = data;
+    throw error;
+  }
+
+  return data;
 }
+
+async function sendTemplateMessage(phone, templateName, parameters = []) {
+  if (!templateName) {
+    throw new Error("Nome do modelo de mensagem não configurado.");
+  }
+
+  if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
+    throw new Error(
+      "Configure META_ACCESS_TOKEN e META_PHONE_NUMBER_ID para enviar templates diretamente pela Meta."
+    );
+  }
+
+  const payload = buildMetaTemplatePayload(
+    phone,
+    templateName,
+    parameters
+  );
+
+  console.log("[meta-template] enviando diretamente pela Graph API", {
+    phone: payload.to,
+    template: payload.template.name,
+    language: payload.template.language.code,
+    hasImageHeader: payload.template.components.some(
+      component => component.type === "header"
+    )
+  });
+
+  const result = await metaRequest(
+    `${META_PHONE_NUMBER_ID}/messages`,
+    payload
+  );
+
+  console.log("[meta-template] aceito pela Meta", {
+    phone: payload.to,
+    template: payload.template.name,
+    messageId: result?.messages?.[0]?.id || null
+  });
+
+  return result;
+}
+
 function responseMessageId(result) {
   return result?.messages?.[0]?.id || result?.messageId || result?.message_id || result?.id || null;
 }
@@ -1427,20 +1526,26 @@ async function fetchMedia(message) {
 
 app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", enabled: botEnabled, webhook: "/webhook" }));
 app.get("/status", requireApiKey, (_req, res) => {
-  const configured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
+  const apolloConfigured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
+  const metaConfigured = Boolean(META_ACCESS_TOKEN && META_PHONE_NUMBER_ID);
+  const configured = apolloConfigured && metaConfigured;
+
   cleanupCustomerServiceWindows();
+
   res.json({
     ok: true,
     enabled: botEnabled,
     configured,
     ready: configured,
-    state: configured ? "Apollo Gateway conectado" : "Não configurado",
+    state: configured
+      ? "Apollo conectado + Meta direta configurada"
+      : "Configuração incompleta",
     sent: botStats.sent,
     failed: botStats.failed,
     received: botStats.received,
     open24hWindows: customerServiceWindows.size,
     startedAt: botStats.startedAt,
-    provider: "apollo"
+    provider: "apollo+meta-direct", apolloConfigured, metaConfigured
   });
 });
 app.post("/toggle", requireApiKey, (req, res) => {
@@ -1457,7 +1562,7 @@ app.post("/send-new-site", requireApiKey, async (req, res) => {
     const parameters = Array.isArray(req.body?.parameters) ? req.body.parameters : [name];
     const result = await trackedSend(() => sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters));
     res.json({ ok: true, phone, template: TEMPLATE_NAMES.novo_site, messageId: responseMessageId(result) });
-  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.meta || error.apollo }); }
 });
 app.post("/order-created", requireApiKey, async (req, res) => {
   const order = req.body?.order || req.body;
@@ -1548,13 +1653,13 @@ app.post("/order-created", requireApiKey, async (req, res) => {
     console.error("[order-created] falha total", {
       order: orderNumber(order),
       error: error.message,
-      details: error.apollo || null
+      details: error.meta || error.apollo || null
     });
 
     return res.status(error.status || 500).json({
       ok: false,
       error: error.message,
-      details: error.apollo
+      details: error.meta || error.apollo
     });
   }
 });
@@ -1604,13 +1709,13 @@ app.post("/send-status", requireApiKey, async (req, res) => {
       order: orderNumber(order),
       status: normalizeOrderStatus(status),
       error: error.message,
-      details: error.apollo || null
+      details: error.meta || error.apollo || null
     });
 
     return res.status(error.status || 500).json({
       ok: false,
       error: error.message,
-      details: error.apollo
+      details: error.meta || error.apollo
     });
   }
 });
@@ -1622,7 +1727,7 @@ app.post("/send", requireApiKey, async (req, res) => {
     const result = await trackedSend(() => sendTextMessage(phone, message));
     receivedMessages.unshift({ id: responseMessageId(result) || `local-${Date.now()}`, phone, name: String(req.body?.name || "Cliente"), type: "text", text: message, mediaId: "", mediaUrl: "", mimeType: "", filename: "", voice: false, direction: "outgoing", status: "sent", receivedAt: new Date().toISOString(), read: true });
     res.json({ ok: true, phone, messageId: responseMessageId(result) });
-  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.apollo }); }
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.meta || error.apollo }); }
 });
 app.post("/broadcast", requireApiKey, async (req, res) => {
   if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
@@ -1797,7 +1902,7 @@ app.post("/webhook", (req, res) => {
       } catch (error) {
         console.error("[auto-reply] erro ao processar webhook Apollo:", {
           error: error.message,
-          details: error.apollo || null
+          details: error.meta || error.apollo || null
         });
       }
     });
@@ -1818,6 +1923,10 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
   console.log(`Imagem automática: ${AUTO_MESSAGE_IMAGE_URL || "DESATIVADA"}`);
   console.log(`Token de verificação Meta: ${META_VERIFY_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
+  console.log(`Meta Access Token: ${META_ACCESS_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
+  console.log(`Meta Phone Number ID: ${META_PHONE_NUMBER_ID ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
+  console.log(`Graph API: ${GRAPH_API_VERSION}`);
   console.log("Janela de 24 horas: verificação preventiva ATIVA");
-  console.log("Sem interação conhecida: envia template Meta diretamente");
+  console.log("Dentro da janela: mensagem normal pelo Apollo");
+  console.log("Fora da janela: template direto pela Meta Graph API");
 });
