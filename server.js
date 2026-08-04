@@ -1478,6 +1478,67 @@ function extractWebhookMessages(body) {
 
   return [...unique.values()];
 }
+
+function extractMetaStatuses(body) {
+  const statuses = [];
+
+  for (const entry of body?.entry || []) {
+    for (const change of entry?.changes || []) {
+      const value = change?.value || {};
+
+      for (const status of value?.statuses || []) {
+        statuses.push({
+          id: String(status?.id || ""),
+          status: String(status?.status || "unknown"),
+          recipientId: String(status?.recipient_id || ""),
+          timestamp: String(status?.timestamp || ""),
+          conversationId: String(status?.conversation?.id || ""),
+          pricing: status?.pricing || null,
+          errors: Array.isArray(status?.errors) ? status.errors : []
+        });
+      }
+    }
+  }
+
+  return statuses;
+}
+
+function logMetaStatuses(statuses) {
+  for (const item of statuses) {
+    const normalizedStatus = String(item.status || "unknown").toLowerCase();
+
+    const baseLog = {
+      messageId: item.id || null,
+      status: normalizedStatus,
+      recipient: item.recipientId || null,
+      timestamp: item.timestamp || null,
+      conversationId: item.conversationId || null,
+      pricing: item.pricing || null
+    };
+
+    if (normalizedStatus === "failed") {
+      console.error("[meta-status] failed", {
+        ...baseLog,
+        errors: item.errors
+      });
+
+      for (const error of item.errors) {
+        console.error("[meta-status] erro detalhado", {
+          code: error?.code ?? null,
+          title: error?.title || null,
+          message: error?.message || null,
+          errorData: error?.error_data || null,
+          href: error?.href || null
+        });
+      }
+
+      continue;
+    }
+
+    console.log(`[meta-status] ${normalizedStatus}`, baseLog);
+  }
+}
+
 function isDuplicateMessage(messageId) {
   const now = Date.now();
   for (const [id, timestamp] of processedMessageIds.entries()) if (now - timestamp > MESSAGE_CACHE_TTL_MS) processedMessageIds.delete(id);
@@ -1817,13 +1878,23 @@ app.post("/webhook", (req, res) => {
     keys: Object.keys(req.body || {}).slice(0, 20)
   });
 
+  // Status assíncronos da Meta: sent, delivered, read e failed.
+  const metaStatuses = extractMetaStatuses(req.body);
+
+  if (metaStatuses.length) {
+    console.log("[webhook] status Meta interpretados", {
+      quantidade: metaStatuses.length
+    });
+    logMetaStatuses(metaStatuses);
+  }
+
   const messages = extractWebhookMessages(req.body);
 
   console.log("[webhook] mensagens interpretadas", {
     quantidade: messages.length
   });
 
-  if (!messages.length) {
+  if (!messages.length && !metaStatuses.length) {
     console.log("[webhook] corpo não reconhecido", JSON.stringify(req.body).slice(0, 2500));
   }
 
@@ -1929,4 +2000,5 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("Janela de 24 horas: verificação preventiva ATIVA");
   console.log("Dentro da janela: mensagem normal pelo Apollo");
   console.log("Fora da janela: template direto pela Meta Graph API");
+  console.log("Status Meta no webhook: ATIVO (sent/delivered/read/failed)");
 });
