@@ -76,6 +76,52 @@ const processedMessageIds = new Map();
 const MESSAGE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const receivedMessages = [];
 const MAX_RECEIVED_MESSAGES = 500;
+const customerServiceWindows = new Map();
+const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+function registerCustomerInteraction(phone, timestamp = Date.now()) {
+  try {
+    const normalizedPhone = normalizeBrazilianPhone(phone);
+    const numericTimestamp = Number(timestamp);
+    const interactionAt = Number.isFinite(numericTimestamp)
+      ? (numericTimestamp > 1e12 ? numericTimestamp : numericTimestamp * 1000)
+      : Date.now();
+
+    customerServiceWindows.set(normalizedPhone, interactionAt || Date.now());
+    return interactionAt || Date.now();
+  } catch {
+    return null;
+  }
+}
+
+function cleanupCustomerServiceWindows() {
+  const now = Date.now();
+
+  for (const [phone, timestamp] of customerServiceWindows.entries()) {
+    if (!timestamp || now - timestamp >= CUSTOMER_SERVICE_WINDOW_MS) {
+      customerServiceWindows.delete(phone);
+    }
+  }
+}
+
+function customerServiceWindowStatus(phone) {
+  cleanupCustomerServiceWindows();
+
+  const normalizedPhone = normalizeBrazilianPhone(phone);
+  const lastInteractionAt = customerServiceWindows.get(normalizedPhone) || 0;
+  const remainingMs = lastInteractionAt
+    ? Math.max(0, CUSTOMER_SERVICE_WINDOW_MS - (Date.now() - lastInteractionAt))
+    : 0;
+
+  return {
+    phone: normalizedPhone,
+    open: remainingMs > 0,
+    lastInteractionAt: lastInteractionAt
+      ? new Date(lastInteractionAt).toISOString()
+      : null,
+    remainingMs
+  };
+}
 
 function validateConfiguration() {
   const missing = [];
@@ -1382,7 +1428,20 @@ async function fetchMedia(message) {
 app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", enabled: botEnabled, webhook: "/webhook" }));
 app.get("/status", requireApiKey, (_req, res) => {
   const configured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
-  res.json({ ok: true, enabled: botEnabled, configured, ready: configured, state: configured ? "Apollo Gateway conectado" : "Não configurado", sent: botStats.sent, failed: botStats.failed, received: botStats.received, startedAt: botStats.startedAt, provider: "apollo" });
+  cleanupCustomerServiceWindows();
+  res.json({
+    ok: true,
+    enabled: botEnabled,
+    configured,
+    ready: configured,
+    state: configured ? "Apollo Gateway conectado" : "Não configurado",
+    sent: botStats.sent,
+    failed: botStats.failed,
+    received: botStats.received,
+    open24hWindows: customerServiceWindows.size,
+    startedAt: botStats.startedAt,
+    provider: "apollo"
+  });
 });
 app.post("/toggle", requireApiKey, (req, res) => {
   if (typeof req.body?.enabled !== "boolean") return res.status(400).json({ ok: false, error: 'Envie {"enabled": true} ou {"enabled": false}.' });
@@ -1413,26 +1472,31 @@ app.post("/order-created", requireApiKey, async (req, res) => {
     }
 
     const phone = normalizeBrazilianPhone(rawPhone);
-    const message = initialOrderMessage(order);
+    const windowStatus = customerServiceWindowStatus(phone);
 
-    console.log("[order-created] tentando mensagem comum", {
+    console.log("[order-created] janela de 24 horas verificada", {
       order: orderNumber(order),
       phone,
-      payment: isPixPayment(order) ? "pix" : "outros",
-      items: orderItems(order).length,
-      total: orderTotals(order).total,
-      deliveryFee: orderTotals(order).deliveryFee
+      windowOpen: windowStatus.open,
+      lastInteractionAt: windowStatus.lastInteractionAt,
+      remainingMinutes: Math.ceil(windowStatus.remainingMs / 60000),
+      payment: isPixPayment(order) ? "pix" : "outros"
     });
 
-    try {
+    // Cliente falou nas últimas 24 horas:
+    // usa mensagem comum do bot, sem gastar template.
+    if (windowStatus.open) {
+      const message = initialOrderMessage(order);
+
       const result = await trackedSend(() =>
         sendDecoratedMessage(phone, message)
       );
 
-      console.log("[order-created] mensagem comum enviada", {
+      console.log("[order-created] mensagem comum enviada dentro da janela", {
         order: orderNumber(order),
         phone,
-        media: AUTO_MESSAGE_IMAGE_URL ? "image" : "text"
+        media: AUTO_MESSAGE_IMAGE_URL ? "image" : "text",
+        lastInteractionAt: windowStatus.lastInteractionAt
       });
 
       return res.json({
@@ -1440,44 +1504,46 @@ app.post("/order-created", requireApiKey, async (req, res) => {
         mode: AUTO_MESSAGE_IMAGE_URL
           ? "normal-image-message"
           : "normal-message",
+        windowOpen: true,
         phone,
         messageId: responseMessageId(result)
       });
-    } catch (normalError) {
-      console.warn(
-        "[order-created] mensagem comum falhou; tentando template",
-        {
-          order: orderNumber(order),
-          phone,
-          error: normalError.message,
-          details: normalError.apollo || null
-        }
-      );
-
-      const selected = initialOrderTemplate(order);
-      const result = await trackedSend(() =>
-        sendTemplateMessage(
-          phone,
-          selected.name,
-          selected.parameters
-        )
-      );
-
-      console.log("[order-created] template enviado", {
-        order: orderNumber(order),
-        phone,
-        template: selected.name
-      });
-
-      return res.json({
-        ok: true,
-        mode: "template-fallback",
-        phone,
-        template: selected.name,
-        messageId: responseMessageId(result),
-        normalMessageError: normalError.message
-      });
     }
+
+    // Cliente nunca falou ou a última mensagem passou de 24 horas:
+    // envia o template aprovado diretamente.
+    const selected = initialOrderTemplate(order);
+
+    console.log("[order-created] fora da janela; enviando template Meta", {
+      order: orderNumber(order),
+      phone,
+      template: selected.name,
+      language: TEMPLATE_LANGUAGE,
+      parameters: selected.parameters
+    });
+
+    const result = await trackedSend(() =>
+      sendTemplateMessage(
+        phone,
+        selected.name,
+        selected.parameters
+      )
+    );
+
+    console.log("[order-created] template Meta enviado", {
+      order: orderNumber(order),
+      phone,
+      template: selected.name
+    });
+
+    return res.json({
+      ok: true,
+      mode: "meta-template",
+      windowOpen: false,
+      phone,
+      template: selected.name,
+      messageId: responseMessageId(result)
+    });
   } catch (error) {
     console.error("[order-created] falha total", {
       order: orderNumber(order),
@@ -1663,6 +1729,24 @@ app.post("/webhook", (req, res) => {
         botStats.received += 1;
         storeReceivedMessage(message);
         console.log(`Webhook Apollo: ${message.direction} ${message.type} ${message.from || "sem número"}`);
+
+        if (message.direction === "incoming" && message.from) {
+          const interactionAt = registerCustomerInteraction(
+            message.from,
+            message.timestamp
+          );
+
+          console.log("[window-24h] interação do cliente registrada", {
+            phone: normalizeBrazilianPhone(message.from),
+            interactionAt: interactionAt
+              ? new Date(interactionAt).toISOString()
+              : null,
+            expiresAt: interactionAt
+              ? new Date(interactionAt + CUSTOMER_SERVICE_WINDOW_MS).toISOString()
+              : null
+          });
+        }
+
         if (message.direction === "outgoing" || !message.from || !botEnabled) return;
         if (isHumanSupportRequest(message)) {
           try {
@@ -1734,4 +1818,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
   console.log(`Imagem automática: ${AUTO_MESSAGE_IMAGE_URL || "DESATIVADA"}`);
   console.log(`Token de verificação Meta: ${META_VERIFY_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
+  console.log("Janela de 24 horas: verificação preventiva ATIVA");
+  console.log("Sem interação conhecida: envia template Meta diretamente");
 });
