@@ -439,7 +439,7 @@ function initialOrderMessage(order) {
       `Assim que confirmarmos, o pedido seguirá direto para o preparo. 😋🔥`,
       ``,
       `Obrigado por escolher a Ki-Burguer! 💚`
-    ].join("\\n");
+    ].join("\n");
   }
 
   return [
@@ -452,7 +452,7 @@ function initialOrderMessage(order) {
     `Em breve você receberá novas atualizações por aqui. 😋🔥`,
     ``,
     `Obrigado por escolher a Ki-Burguer! 💚`
-  ].join("\\n");
+  ].join("\n");
 }
 
 function initialOrderTemplate(order) {
@@ -569,13 +569,42 @@ function parseOneMessage(payload, inherited = {}) {
   const mediaObject = first(payload[type], payload.media, payload.attachment, {});
   const id = String(first(payload.id, payload.message_id, payload.messageId, payload.key?.id, crypto.randomUUID()));
   const phone = String(first(
-    payload.from, payload.phone, payload.wa_id, payload.sender, payload.senderId,
-    payload.contact?.phone, payload.contact?.wa_id, payload.key?.remoteJid, inherited.phone, ""
+    payload.from,
+    payload.phone,
+    payload.wa_id,
+    payload.sender,
+    payload.senderId,
+    payload.sender?.phone,
+    payload.sender?.id,
+    payload.author,
+    payload.remoteJid,
+    payload.chatId,
+    payload.contact?.phone,
+    payload.contact?.wa_id,
+    payload.key?.remoteJid,
+    payload.data?.from,
+    payload.data?.phone,
+    inherited.phone,
+    ""
   )).replace(/@.+$/, "").replace(/\D/g, "");
   const text = String(first(
-    payload.text?.body, payload.text, payload.body, payload.message, payload.content,
-    payload.caption, payload.interactive?.button_reply?.title, payload.interactive?.list_reply?.title,
-    payload.button?.text, ""
+    payload.text?.body,
+    payload.text?.message,
+    payload.text,
+    payload.body,
+    payload.message?.text,
+    payload.message?.body,
+    payload.message,
+    payload.content?.text,
+    payload.content?.body,
+    payload.content,
+    payload.data?.text,
+    payload.data?.body,
+    payload.caption,
+    payload.interactive?.button_reply?.title,
+    payload.interactive?.list_reply?.title,
+    payload.button?.text,
+    ""
   ));
   const mediaId = String(first(
     mediaObject?.id, payload.mediaId, payload.media_id, payload.attachmentId, payload.attachment_id, ""
@@ -598,35 +627,124 @@ function parseOneMessage(payload, inherited = {}) {
 }
 function extractWebhookMessages(body) {
   const results = [];
-  // Formato Meta-compatible, que muitos gateways mantêm.
+
+  // Formato Meta/WhatsApp Cloud API.
   for (const entry of body?.entry || []) {
     for (const change of entry?.changes || []) {
       const value = change?.value || {};
       const name = value?.contacts?.[0]?.profile?.name || "Cliente";
+
       for (const message of value?.messages || []) {
-        const parsed = parseOneMessage(message, { name, direction: "incoming" });
+        const parsed = parseOneMessage(message, {
+          name,
+          direction: "incoming",
+          phone: message?.from || value?.contacts?.[0]?.wa_id || ""
+        });
         if (parsed) results.push(parsed);
       }
     }
   }
-  // Formatos genéricos do Apollo/gateways: message, data.message, payload, messages, data.messages.
-  const candidates = [body?.message, body?.data?.message, body?.payload?.message, body?.payload];
+
+  // Formatos comuns do Apollo e gateways compatíveis.
+  const candidates = [
+    body,
+    body?.message,
+    body?.data,
+    body?.data?.message,
+    body?.event,
+    body?.event?.message,
+    body?.payload,
+    body?.payload?.message,
+    body?.object,
+    body?.object?.message
+  ];
+
   for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object") continue;
+
     const parsed = parseOneMessage(candidate, {
-      direction: first(body?.direction, body?.event?.includes?.("out") ? "outgoing" : "incoming"),
-      status: body?.status
+      direction: first(
+        candidate?.direction,
+        body?.direction,
+        body?.event_direction,
+        String(body?.event || body?.type || "").toLowerCase().includes("out")
+          ? "outgoing"
+          : "incoming"
+      ),
+      status: first(candidate?.status, body?.status),
+      phone: first(
+        candidate?.from,
+        candidate?.phone,
+        candidate?.wa_id,
+        body?.from,
+        body?.phone,
+        body?.wa_id
+      ),
+      name: first(
+        candidate?.contactName,
+        candidate?.profileName,
+        candidate?.name,
+        body?.contactName,
+        body?.profileName,
+        body?.name,
+        "Cliente"
+      )
     });
-    if (parsed && (parsed.from || parsed.text || parsed.mediaId || parsed.mediaUrl)) results.push(parsed);
+
+    if (parsed && (parsed.from || parsed.text || parsed.mediaId || parsed.mediaUrl)) {
+      results.push(parsed);
+    }
   }
-  for (const list of [body?.messages, body?.data?.messages, body?.payload?.messages]) {
+
+  // Listas em caminhos frequentes.
+  const lists = [
+    body?.messages,
+    body?.data?.messages,
+    body?.payload?.messages,
+    body?.event?.messages,
+    body?.object?.messages,
+    body?.data?.items,
+    body?.items
+  ];
+
+  for (const list of lists) {
     if (!Array.isArray(list)) continue;
+
     for (const item of list) {
-      const parsed = parseOneMessage(item, { direction: body?.direction, status: body?.status });
+      const parsed = parseOneMessage(item, {
+        direction: first(
+          item?.direction,
+          body?.direction,
+          String(body?.event || body?.type || "").toLowerCase().includes("out")
+            ? "outgoing"
+            : "incoming"
+        ),
+        status: first(item?.status, body?.status),
+        phone: first(item?.from, item?.phone, item?.wa_id, body?.from, body?.phone),
+        name: first(item?.contactName, item?.profileName, item?.name, "Cliente")
+      });
+
       if (parsed) results.push(parsed);
     }
   }
+
+  // Evita respostas automáticas para eventos de status/entrega sem mensagem.
+  const filtered = results.filter(item =>
+    item &&
+    item.id &&
+    (
+      item.text ||
+      item.mediaId ||
+      item.mediaUrl ||
+      ["audio", "image", "video", "document", "sticker"].includes(item.type)
+    )
+  );
+
   const unique = new Map();
-  for (const item of results) unique.set(`${item.id}:${item.direction}`, item);
+  for (const item of filtered) {
+    unique.set(`${item.id}:${item.direction}`, item);
+  }
+
   return [...unique.values()];
 }
 function isDuplicateMessage(messageId) {
@@ -927,9 +1045,28 @@ app.get("/webhook", (req, res) => {
   return res.status(403).send("Forbidden");
 });
 app.post("/webhook", (req, res) => {
-  if (!verifyApolloWebhook(req)) return res.status(401).json({ ok: false, error: "Segredo do webhook inválido." });
+  if (!verifyApolloWebhook(req)) {
+    console.warn("[webhook] segredo inválido");
+    return res.status(401).json({ ok: false, error: "Segredo do webhook inválido." });
+  }
+
   res.sendStatus(200);
+
+  console.log("[webhook] evento recebido", {
+    event: req.body?.event || req.body?.type || req.body?.action || "desconhecido",
+    keys: Object.keys(req.body || {}).slice(0, 20)
+  });
+
   const messages = extractWebhookMessages(req.body);
+
+  console.log("[webhook] mensagens interpretadas", {
+    quantidade: messages.length
+  });
+
+  if (!messages.length) {
+    console.log("[webhook] corpo não reconhecido", JSON.stringify(req.body).slice(0, 2500));
+  }
+
   for (const message of messages) {
     setImmediate(async () => {
       try {
@@ -939,11 +1076,57 @@ app.post("/webhook", (req, res) => {
         console.log(`Webhook Apollo: ${message.direction} ${message.type} ${message.from || "sem número"}`);
         if (message.direction === "outgoing" || !message.from || !botEnabled) return;
         if (isHumanSupportRequest(message)) {
-          await trackedSend(() => sendDecoratedMessage(message.from, HUMAN_SUPPORT_REPLY, message.id));
+          try {
+            await trackedSend(() =>
+              sendDecoratedMessage(message.from, HUMAN_SUPPORT_REPLY, message.id)
+            );
+          } catch (imageError) {
+            console.warn("[auto-reply] imagem falhou; enviando texto", {
+              phone: message.from,
+              error: imageError.message
+            });
+            await trackedSend(() =>
+              sendTextMessage(message.from, HUMAN_SUPPORT_REPLY, message.id)
+            );
+          }
           return;
         }
-        await trackedSend(() => sendDecoratedMessage(message.from, AUTO_REPLY_MESSAGE, message.id));
-      } catch (error) { console.error("Erro ao processar webhook Apollo:", error.apollo || error); }
+
+        console.log("[auto-reply] respondendo cliente", {
+          phone: message.from,
+          type: message.type,
+          messageId: message.id
+        });
+
+        try {
+          await trackedSend(() =>
+            sendDecoratedMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
+          );
+
+          console.log("[auto-reply] resposta com imagem enviada", {
+            phone: message.from
+          });
+        } catch (imageError) {
+          console.warn("[auto-reply] imagem falhou; enviando texto", {
+            phone: message.from,
+            error: imageError.message,
+            details: imageError.apollo || null
+          });
+
+          await trackedSend(() =>
+            sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
+          );
+
+          console.log("[auto-reply] resposta em texto enviada", {
+            phone: message.from
+          });
+        }
+      } catch (error) {
+        console.error("[auto-reply] erro ao processar webhook Apollo:", {
+          error: error.message,
+          details: error.apollo || null
+        });
+      }
     });
   }
 });
