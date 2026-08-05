@@ -223,84 +223,172 @@ function authHeaders() {
 }
 
 async function apolloRequest(body) {
-  const authValue = APOLLO_AUTH_PREFIX
+  const configuredHeader = APOLLO_AUTH_HEADER || "x-api-key";
+  const configuredValue = APOLLO_AUTH_PREFIX
     ? `${APOLLO_AUTH_PREFIX} ${APOLLO_API_KEY}`
     : APOLLO_API_KEY;
 
-  const marker = "__APOLLO_META__";
-  const args = [
-    "--http1.1",
-    "--silent",
-    "--show-error",
-    "--location",
-    "--connect-timeout", "15",
-    "--max-time", "35",
-    "--request", "POST",
-    APOLLO_SEND_URL,
-    "--header", `${APOLLO_AUTH_HEADER}: ${authValue}`,
-    "--header", "Content-Type: application/json",
-    "--data-raw", JSON.stringify(body),
-    "--write-out", `\n${marker}%{http_code}|%{content_type}`
-  ];
+  // Primeiro usa exatamente a configuração do Northflank.
+  // Em erro 401/403, tenta formatos comuns do Apollo sem duplicar envios aceitos.
+  const authAttempts = [
+    {
+      label: "configurado",
+      header: configuredHeader,
+      value: configuredValue
+    },
+    {
+      label: "x-api-key",
+      header: "x-api-key",
+      value: APOLLO_API_KEY
+    },
+    {
+      label: "authorization-bearer",
+      header: "Authorization",
+      value: `Bearer ${APOLLO_API_KEY}`
+    },
+    {
+      label: "authorization-raw",
+      header: "Authorization",
+      value: APOLLO_API_KEY
+    }
+  ].filter((attempt, index, list) =>
+    list.findIndex(item =>
+      item.header.toLowerCase() === attempt.header.toLowerCase() &&
+      item.value === attempt.value
+    ) === index
+  );
 
-  let stdout;
-  try {
-    const result = await execFileAsync("curl", args, {
-      maxBuffer: 10 * 1024 * 1024,
-      windowsHide: true
+  let lastError = null;
+
+  for (let attemptIndex = 0; attemptIndex < authAttempts.length; attemptIndex += 1) {
+    const attempt = authAttempts[attemptIndex];
+    const marker = "__APOLLO_META__";
+
+    const args = [
+      "--http1.1",
+      "--silent",
+      "--show-error",
+      "--location",
+      "--connect-timeout", "15",
+      "--max-time", "35",
+      "--request", "POST",
+      APOLLO_SEND_URL,
+      "--header", `${attempt.header}: ${attempt.value}`,
+      "--header", "Content-Type: application/json",
+      "--header", "Accept: application/json",
+      "--data-raw", JSON.stringify(body),
+      "--write-out", `\n${marker}%{http_code}|%{content_type}`
+    ];
+
+    let stdout;
+
+    try {
+      const result = await execFileAsync("curl", args, {
+        maxBuffer: 10 * 1024 * 1024,
+        windowsHide: true
+      });
+      stdout = String(result.stdout || "");
+    } catch (error) {
+      const detail = String(error?.stderr || error?.message || "Falha desconhecida").trim();
+      const curlError = new Error(`Falha ao chamar o Apollo: ${detail}`);
+      curlError.status = 502;
+      curlError.apollo = { detail, authAttempt: attempt.label };
+      throw curlError;
+    }
+
+    const markerIndex = stdout.lastIndexOf(`\n${marker}`);
+
+    if (markerIndex < 0) {
+      const error = new Error("O Apollo retornou uma resposta sem metadados HTTP.");
+      error.status = 502;
+      error.apollo = {
+        preview: stdout.slice(0, 500),
+        authAttempt: attempt.label
+      };
+      throw error;
+    }
+
+    const responseText = stdout.slice(0, markerIndex);
+    const meta = stdout.slice(markerIndex + marker.length + 1).trim();
+    const separator = meta.indexOf("|");
+    const status = Number(separator >= 0 ? meta.slice(0, separator) : meta) || 0;
+    const contentType = String(
+      separator >= 0 ? meta.slice(separator + 1) : ""
+    ).toLowerCase();
+
+    let data = {};
+
+    try {
+      data = responseText ? JSON.parse(responseText) : {};
+    } catch {
+      data = { raw: responseText };
+    }
+
+    console.log("[apollo-send] resposta", {
+      status,
+      authAttempt: attempt.label,
+      authHeader: attempt.header,
+      endpoint: (() => {
+        try {
+          const parsed = new URL(APOLLO_SEND_URL);
+          return `${parsed.origin}${parsed.pathname}`;
+        } catch {
+          return "URL inválida";
+        }
+      })(),
+      keyConfigured: Boolean(APOLLO_API_KEY),
+      keyPrefix: APOLLO_API_KEY ? `${APOLLO_API_KEY.slice(0, 5)}...` : "ausente"
     });
-    stdout = String(result.stdout || "");
-  } catch (error) {
-    const detail = String(error?.stderr || error?.message || "Falha desconhecida").trim();
-    const curlError = new Error(`Falha ao chamar o Apollo: ${detail}`);
-    curlError.status = 502;
-    curlError.apollo = { detail };
-    throw curlError;
-  }
 
-  const markerIndex = stdout.lastIndexOf(`\n${marker}`);
-  if (markerIndex < 0) {
-    const error = new Error("O Apollo retornou uma resposta sem metadados HTTP.");
-    error.status = 502;
-    error.apollo = { preview: stdout.slice(0, 500) };
-    throw error;
-  }
+    if (
+      contentType.includes("text/html") ||
+      /^\s*<!doctype html/i.test(responseText)
+    ) {
+      const error = new Error(
+        `O Cloudflare do Apollo bloqueou a saída do servidor (HTTP ${status || "desconhecido"}).`
+      );
+      error.status = 502;
+      error.apollo = {
+        contentType,
+        preview: responseText.slice(0, 500),
+        authAttempt: attempt.label
+      };
+      throw error;
+    }
 
-  const responseText = stdout.slice(0, markerIndex);
-  const meta = stdout.slice(markerIndex + marker.length + 1).trim();
-  const separator = meta.indexOf("|");
-  const status = Number(separator >= 0 ? meta.slice(0, separator) : meta) || 0;
-  const contentType = String(separator >= 0 ? meta.slice(separator + 1) : "").toLowerCase();
+    if (status >= 200 && status < 300) {
+      return data;
+    }
 
-  let data = {};
-  try {
-    data = responseText ? JSON.parse(responseText) : {};
-  } catch {
-    data = { raw: responseText };
-  }
+    const detail =
+      data?.error?.message ||
+      data?.error ||
+      data?.message ||
+      `Erro HTTP ${status}`;
 
-  if (contentType.includes("text/html") || /^\s*<!doctype html/i.test(responseText)) {
-    const error = new Error(
-      `O Cloudflare do Apollo bloqueou a saída do Render (HTTP ${status || "desconhecido"}).`
-    );
-    error.status = 502;
-    error.apollo = {
-      contentType,
-      preview: responseText.slice(0, 500),
-      diagnosis: "A mesma chamada funciona no Windows, mas o IP do Render recebe o desafio do Cloudflare."
-    };
-    throw error;
-  }
-
-  if (status < 200 || status >= 300) {
-    const detail = data?.error?.message || data?.error || data?.message || `Erro HTTP ${status}`;
     const error = new Error(String(detail));
     error.status = status || 502;
-    error.apollo = data;
-    throw error;
+    error.apollo = {
+      ...data,
+      authAttempt: attempt.label,
+      authHeader: attempt.header
+    };
+    lastError = error;
+
+    // Só troca o formato de autenticação quando a API rejeitou a credencial.
+    // Outros erros não devem ser repetidos para evitar envio duplicado.
+    if (![401, 403].includes(status)) {
+      throw error;
+    }
+
+    console.warn("[apollo-send] autenticação recusada; tentando próximo formato", {
+      status,
+      authAttempt: attempt.label,
+      nextAttempt: authAttempts[attemptIndex + 1]?.label || null
+    });
   }
 
-  return data;
+  throw lastError || new Error("O Apollo recusou todos os formatos de autenticação.");
 }
 
 function buildApolloTextPayload(phone, message, replyToMessageId = null) {
@@ -1992,6 +2080,9 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
+  console.log(`Apollo Send URL: ${APOLLO_SEND_URL ? "CONFIGURADA" : "NÃO CONFIGURADA"}`);
+  console.log(`Apollo Auth Header: ${APOLLO_AUTH_HEADER || "x-api-key"}`);
+  console.log(`Apollo API Key: ${APOLLO_API_KEY ? `${APOLLO_API_KEY.slice(0, 5)}... CONFIGURADA` : "NÃO CONFIGURADA"}`);
   console.log(`Imagem automática: ${AUTO_MESSAGE_IMAGE_URL || "DESATIVADA"}`);
   console.log(`Token de verificação Meta: ${META_VERIFY_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
   console.log(`Meta Access Token: ${META_ACCESS_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
