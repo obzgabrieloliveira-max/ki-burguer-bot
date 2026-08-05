@@ -74,6 +74,18 @@ const AUTO_REPLY_MESSAGE = String(
   `Olá! 🍔 Seja bem-vindo(a) à Ki-Burguer!\n\nAqui você encontra seus lanches favoritos preparados com muito sabor. 😋\n\n📲 Confira o cardápio e faça seu pedido:\n${SITE_URL}\n\nSe precisar de ajuda, é só responder por aqui.`
 ).replace(/\\n/g, "\n").trim();
 
+const CLOSED_REPLY_MESSAGE = String(
+  process.env.CLOSED_REPLY_MESSAGE ||
+  `🍔 Olá! A Ki-Burguer está fechada no momento.\n\nAgradecemos pela sua visita! No momento nossa equipe está fora do horário de atendimento, mas estaremos de volta em breve para preparar o seu lanche.\n\n🕒 *Horário de funcionamento*\n*Segunda a Quinta:* 18h00 às 22h30\n*Sexta a Domingo:* 18h00 às 23h30\n\n📲 *Cardápio:*\n${SITE_URL}\n\n💛 Obrigado pela compreensão!\n*Ki-Burguer – Seu lanche favorito, do seu jeito.*`
+).replace(/\\n/g, "\n").trim();
+
+const CLOSED_MESSAGE_IMAGE_URL = String(
+  process.env.CLOSED_MESSAGE_IMAGE_URL ||
+  "https://ki-cardapio.netlify.app/logo-ki.jpg"
+).trim();
+
+const STORE_TIME_ZONE = "America/Sao_Paulo";
+
 let botEnabled = String(process.env.BOT_ENABLED || "true").toLowerCase() !== "false";
 const ALLOW_REMOTE_SHUTDOWN = String(process.env.ALLOW_REMOTE_SHUTDOWN || "false").toLowerCase() === "true";
 const botStats = { sent: 0, failed: 0, received: 0, startedAt: new Date().toISOString() };
@@ -126,6 +138,56 @@ function customerServiceWindowStatus(phone) {
       : null,
     remainingMs
   };
+}
+
+
+function storeClockParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: STORE_TIME_ZONE,
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+
+  const values = Object.fromEntries(
+    parts.filter(part => part.type !== "literal").map(part => [part.type, part.value])
+  );
+
+  return {
+    weekday: String(values.weekday || "").toLowerCase(),
+    minutes: Number(values.hour || 0) * 60 + Number(values.minute || 0)
+  };
+}
+
+function storeScheduleStatus(date = new Date()) {
+  const { weekday, minutes } = storeClockParts(date);
+  const openAt = 18 * 60;
+  const closeAt = ["fri", "sat", "sun"].includes(weekday)
+    ? 23 * 60 + 30
+    : 22 * 60 + 30;
+
+  return {
+    open: minutes >= openAt && minutes < closeAt,
+    weekday,
+    minutes,
+    openAt,
+    closeAt,
+    timeZone: STORE_TIME_ZONE
+  };
+}
+
+async function sendClosedMessage(phone, replyToMessageId = null) {
+  if (CLOSED_MESSAGE_IMAGE_URL) {
+    return sendImageMessage(
+      phone,
+      CLOSED_MESSAGE_IMAGE_URL,
+      CLOSED_REPLY_MESSAGE,
+      replyToMessageId
+    );
+  }
+
+  return sendTextMessage(phone, CLOSED_REPLY_MESSAGE, replyToMessageId);
 }
 
 function validateConfiguration() {
@@ -1924,6 +1986,42 @@ app.post("/webhook", (req, res) => {
         }
 
         if (message.direction === "outgoing" || !message.from || !botEnabled) return;
+
+        const schedule = storeScheduleStatus();
+
+        if (!schedule.open) {
+          console.log("[auto-reply] loja fechada; enviando mensagem automática", {
+            phone: message.from,
+            weekday: schedule.weekday,
+            minutes: schedule.minutes,
+            timeZone: schedule.timeZone,
+            image: CLOSED_MESSAGE_IMAGE_URL || null
+          });
+
+          try {
+            await trackedSend(() =>
+              sendClosedMessage(message.from, message.id)
+            );
+
+            console.log("[auto-reply] mensagem de loja fechada enviada", {
+              phone: message.from,
+              media: CLOSED_MESSAGE_IMAGE_URL ? "image" : "text"
+            });
+          } catch (closedImageError) {
+            console.warn("[auto-reply] imagem de fechado falhou; enviando texto", {
+              phone: message.from,
+              error: closedImageError.message,
+              details: closedImageError.apollo || null
+            });
+
+            await trackedSend(() =>
+              sendTextMessage(message.from, CLOSED_REPLY_MESSAGE, message.id)
+            );
+          }
+
+          return;
+        }
+
         if (isHumanSupportRequest(message)) {
           try {
             await trackedSend(() =>
@@ -1993,6 +2091,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
   console.log(`Imagem automática: ${AUTO_MESSAGE_IMAGE_URL || "DESATIVADA"}`);
+  console.log(`Imagem loja fechada: ${CLOSED_MESSAGE_IMAGE_URL || "DESATIVADA"}`);
+  console.log(`Horário automático: SEG-QUI 18:00-22:30 | SEX-DOM 18:00-23:30 (${STORE_TIME_ZONE})`);
   console.log(`Token de verificação Meta: ${META_VERIFY_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
   console.log(`Meta Access Token: ${META_ACCESS_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
   console.log(`Meta Phone Number ID: ${META_PHONE_NUMBER_ID ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
