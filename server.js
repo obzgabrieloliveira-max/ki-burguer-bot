@@ -1389,10 +1389,15 @@ function parseOneMessage(payload, inherited = {}) {
   const id = String(first(payload.id, payload.message_id, payload.messageId, payload.key?.id, crypto.randomUUID()));
   const phone = String(first(
     payload.from,
+    payload.remetente,
+    payload.telefone,
+    payload.numero,
     payload.phone,
     payload.wa_id,
     payload.sender,
     payload.senderId,
+    payload.enviado_por,
+    payload.id_remetente,
     payload.sender?.phone,
     payload.sender?.id,
     payload.author,
@@ -1402,7 +1407,12 @@ function parseOneMessage(payload, inherited = {}) {
     payload.contact?.wa_id,
     payload.key?.remoteJid,
     payload.data?.from,
+    payload.data?.remetente,
+    payload.data?.telefone,
     payload.data?.phone,
+    payload.dados?.from,
+    payload.dados?.remetente,
+    payload.dados?.telefone,
     inherited.phone,
     ""
   )).replace(/@.+$/, "").replace(/\D/g, "");
@@ -1410,18 +1420,30 @@ function parseOneMessage(payload, inherited = {}) {
     payload.text?.body,
     payload.text?.message,
     payload.text,
+    payload.texto?.corpo,
+    payload.texto?.mensagem,
+    payload.texto,
     payload.body,
+    payload.corpo,
     payload.message?.text,
     payload.message?.body,
     payload.message,
+    payload.mensagem?.texto,
+    payload.mensagem?.corpo,
+    payload.mensagem,
     payload.content?.text,
     payload.content?.body,
     payload.content,
     payload.data?.text,
     payload.data?.body,
+    payload.dados?.texto,
+    payload.dados?.corpo,
     payload.caption,
+    payload.legenda,
     payload.interactive?.button_reply?.title,
     payload.interactive?.list_reply?.title,
+    payload.interativo?.resposta_botao?.titulo,
+    payload.interativo?.resposta_lista?.titulo,
     payload.button?.text,
     ""
   ));
@@ -1434,13 +1456,30 @@ function parseOneMessage(payload, inherited = {}) {
   ));
   return {
     id, from: phone, type, text,
-    contactName: String(first(payload.contactName, payload.name, payload.profileName, payload.contact?.name, inherited.name, "Cliente")),
+    contactName: String(first(
+      payload.contactName,
+      payload.name,
+      payload.nome,
+      payload.profileName,
+      payload.nomePerfil,
+      payload.contact?.name,
+      payload.contato?.nome,
+      inherited.name,
+      "Cliente"
+    )),
     mediaId, mediaUrl,
     mimeType: String(first(mediaObject?.mime_type, mediaObject?.mimeType, payload.mimeType, payload.mime_type, "")),
     fileName: String(first(mediaObject?.filename, payload.filename, payload.file_name, "")),
     voice: Boolean(payload.voice || payload.audio?.voice || type === "audio"),
     direction: outgoing ? "outgoing" : "incoming",
-    timestamp: first(payload.timestamp, payload.createdAt, payload.receivedAt, Date.now()),
+    timestamp: first(
+      payload.timestamp,
+      payload.tempo,
+      payload.data_hora,
+      payload.createdAt,
+      payload.receivedAt,
+      Date.now()
+    ),
     status: String(first(payload.status, inherited.status, outgoing ? "sent" : "received"))
   };
 }
@@ -1464,6 +1503,56 @@ function extractWebhookMessages(body) {
     }
   }
 
+  // Formato traduzido/normalizado usado em alguns eventos do Apollo/Meta.
+  for (const entry of body?.entrada || []) {
+    const changes = entry?.changes || entry?.alteracoes || entry?.mudancas || [];
+
+    for (const change of changes) {
+      const value =
+        change?.value ||
+        change?.valor ||
+        change?.dados ||
+        {};
+
+      const contacts =
+        value?.contacts ||
+        value?.contatos ||
+        [];
+
+      const messages =
+        value?.messages ||
+        value?.mensagens ||
+        [];
+
+      const name =
+        contacts?.[0]?.profile?.name ||
+        contacts?.[0]?.perfil?.nome ||
+        contacts?.[0]?.name ||
+        contacts?.[0]?.nome ||
+        "Cliente";
+
+      const contactPhone =
+        contacts?.[0]?.wa_id ||
+        contacts?.[0]?.telefone ||
+        contacts?.[0]?.numero ||
+        "";
+
+      for (const message of messages) {
+        const parsed = parseOneMessage(message, {
+          name,
+          direction: "incoming",
+          phone:
+            message?.from ||
+            message?.remetente ||
+            message?.telefone ||
+            contactPhone
+        });
+
+        if (parsed) results.push(parsed);
+      }
+    }
+  }
+
   // Formatos comuns do Apollo e gateways compatíveis.
   const candidates = [
     body,
@@ -1475,7 +1564,11 @@ function extractWebhookMessages(body) {
     body?.payload,
     body?.payload?.message,
     body?.object,
-    body?.object?.message
+    body?.object?.message,
+    body?.objeto,
+    body?.objeto?.mensagem,
+    body?.dados,
+    body?.dados?.mensagem
   ];
 
   for (const candidate of candidates) {
@@ -1496,6 +1589,9 @@ function extractWebhookMessages(body) {
         candidate?.phone,
         candidate?.wa_id,
         body?.from,
+        body?.remetente,
+        body?.telefone,
+        body?.numero,
         body?.phone,
         body?.wa_id
       ),
@@ -1506,6 +1602,8 @@ function extractWebhookMessages(body) {
         body?.contactName,
         body?.profileName,
         body?.name,
+        body?.nome,
+        body?.nomePerfil,
         "Cliente"
       )
     });
@@ -1522,8 +1620,11 @@ function extractWebhookMessages(body) {
     body?.payload?.messages,
     body?.event?.messages,
     body?.object?.messages,
+    body?.objeto?.mensagens,
     body?.data?.items,
-    body?.items
+    body?.dados?.itens,
+    body?.items,
+    body?.itens
   ];
 
   for (const list of lists) {
@@ -1993,6 +2094,14 @@ app.post("/webhook", (req, res) => {
         botStats.received += 1;
         storeReceivedMessage(message);
         console.log(`Webhook Apollo: ${message.direction} ${message.type} ${message.from || "sem número"}`);
+
+        if (!message.from) {
+          console.warn("[webhook] mensagem recebida sem telefone", {
+            messageId: message.id,
+            type: message.type,
+            textPreview: String(message.text || "").slice(0, 120)
+          });
+        }
 
         if (message.direction === "incoming" && message.from) {
           const interactionAt = registerCustomerInteraction(
