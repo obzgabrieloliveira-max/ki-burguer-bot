@@ -1389,6 +1389,9 @@ function parseOneMessage(payload, inherited = {}) {
   const id = String(first(payload.id, payload.message_id, payload.messageId, payload.key?.id, crypto.randomUUID()));
   const phone = String(first(
     payload.from,
+    payload.remetente,
+    payload.telefone,
+    payload.numero,
     payload.phone,
     payload.wa_id,
     payload.sender,
@@ -1402,7 +1405,12 @@ function parseOneMessage(payload, inherited = {}) {
     payload.contact?.wa_id,
     payload.key?.remoteJid,
     payload.data?.from,
+    payload.data?.remetente,
+    payload.data?.telefone,
     payload.data?.phone,
+    payload.dados?.from,
+    payload.dados?.remetente,
+    payload.dados?.telefone,
     inherited.phone,
     ""
   )).replace(/@.+$/, "").replace(/\D/g, "");
@@ -1410,10 +1418,17 @@ function parseOneMessage(payload, inherited = {}) {
     payload.text?.body,
     payload.text?.message,
     payload.text,
+    payload.texto?.corpo,
+    payload.texto?.mensagem,
+    payload.texto,
     payload.body,
+    payload.corpo,
     payload.message?.text,
     payload.message?.body,
     payload.message,
+    payload.mensagem?.texto,
+    payload.mensagem?.corpo,
+    payload.mensagem,
     payload.content?.text,
     payload.content?.body,
     payload.content,
@@ -1447,26 +1462,77 @@ function parseOneMessage(payload, inherited = {}) {
 function extractWebhookMessages(body) {
   const results = [];
 
-  // Formato Meta/WhatsApp Cloud API.
-  for (const entry of body?.entry || []) {
-    for (const change of entry?.changes || []) {
-      const value = change?.value || {};
-      const name = value?.contacts?.[0]?.profile?.name || "Cliente";
+  // Formato Meta/WhatsApp Cloud API, incluindo o formato traduzido
+  // observado no webhook: objeto -> entrada -> alterações -> valor.
+  const webhookEntries = [
+    ...(Array.isArray(body?.entry) ? body.entry : []),
+    ...(Array.isArray(body?.entrada) ? body.entrada : [])
+  ];
 
-      for (const message of value?.messages || []) {
+  for (const entry of webhookEntries) {
+    const webhookChanges = [
+      ...(Array.isArray(entry?.changes) ? entry.changes : []),
+      ...(Array.isArray(entry?.alteracoes) ? entry.alteracoes : []),
+      ...(Array.isArray(entry?.["alterações"]) ? entry["alterações"] : []),
+      ...(Array.isArray(entry?.mudancas) ? entry.mudancas : []),
+      ...(Array.isArray(entry?.["mudanças"]) ? entry["mudanças"] : [])
+    ];
+
+    for (const change of webhookChanges) {
+      const value =
+        change?.value ||
+        change?.valor ||
+        change?.dados ||
+        {};
+
+      const contacts =
+        value?.contacts ||
+        value?.contatos ||
+        [];
+
+      const messages =
+        value?.messages ||
+        value?.mensagens ||
+        [];
+
+      const name =
+        contacts?.[0]?.profile?.name ||
+        contacts?.[0]?.perfil?.nome ||
+        contacts?.[0]?.name ||
+        contacts?.[0]?.nome ||
+        "Cliente";
+
+      const contactPhone =
+        contacts?.[0]?.wa_id ||
+        contacts?.[0]?.telefone ||
+        contacts?.[0]?.numero ||
+        "";
+
+      for (const message of messages) {
         const parsed = parseOneMessage(message, {
           name,
           direction: "incoming",
-          phone: message?.from || value?.contacts?.[0]?.wa_id || ""
+          phone:
+            message?.from ||
+            message?.remetente ||
+            message?.telefone ||
+            message?.numero ||
+            contactPhone
         });
+
         if (parsed) results.push(parsed);
       }
     }
   }
 
   // Formatos comuns do Apollo e gateways compatíveis.
+  // Quando é envelope Meta, não usa o corpo inteiro como uma mensagem.
+  const isMetaEnvelope =
+    Array.isArray(body?.entry) ||
+    Array.isArray(body?.entrada);
+
   const candidates = [
-    body,
+    ...(isMetaEnvelope ? [] : [body]),
     body?.message,
     body?.data,
     body?.data?.message,
@@ -1570,11 +1636,22 @@ function extractWebhookMessages(body) {
 function extractMetaStatuses(body) {
   const statuses = [];
 
-  for (const entry of body?.entry || []) {
-    for (const change of entry?.changes || []) {
-      const value = change?.value || {};
+  const statusEntries = [
+    ...(Array.isArray(body?.entry) ? body.entry : []),
+    ...(Array.isArray(body?.entrada) ? body.entrada : [])
+  ];
 
-      for (const status of value?.statuses || []) {
+  for (const entry of statusEntries) {
+    const statusChanges = [
+      ...(Array.isArray(entry?.changes) ? entry.changes : []),
+      ...(Array.isArray(entry?.alteracoes) ? entry.alteracoes : []),
+      ...(Array.isArray(entry?.["alterações"]) ? entry["alterações"] : [])
+    ];
+
+    for (const change of statusChanges) {
+      const value = change?.value || change?.valor || {};
+
+      for (const status of (value?.statuses || value?.status || [])) {
         statuses.push({
           id: String(status?.id || ""),
           status: String(status?.status || "unknown"),
@@ -1674,6 +1751,20 @@ async function fetchMedia(message) {
 }
 
 app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", enabled: botEnabled, webhook: "/webhook" }));
+app.get("/windows", requireApiKey, (_req, res) => {
+  cleanupCustomerServiceWindows();
+
+  res.json({
+    ok: true,
+    total: customerServiceWindows.size,
+    windows: [...customerServiceWindows.entries()].map(([phone, timestamp]) => ({
+      phone,
+      lastInteractionAt: new Date(timestamp).toISOString(),
+      expiresAt: new Date(timestamp + CUSTOMER_SERVICE_WINDOW_MS).toISOString()
+    }))
+  });
+});
+
 app.get("/status", requireApiKey, (_req, res) => {
   const apolloConfigured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
   const metaConfigured = Boolean(META_ACCESS_TOKEN && META_PHONE_NUMBER_ID);
@@ -1961,8 +2052,6 @@ app.post("/webhook", (req, res) => {
 
   res.sendStatus(200);
 
-  console.log("[WEBHOOK RAW]", JSON.stringify(req.body, null, 2));
-
   console.log("[webhook] evento recebido", {
     event: req.body?.event || req.body?.type || req.body?.action || "desconhecido",
     keys: Object.keys(req.body || {}).slice(0, 20)
@@ -1995,6 +2084,14 @@ app.post("/webhook", (req, res) => {
         botStats.received += 1;
         storeReceivedMessage(message);
         console.log(`Webhook Apollo: ${message.direction} ${message.type} ${message.from || "sem número"}`);
+
+        if (!message.from) {
+          console.warn("[webhook] mensagem recebida sem telefone", {
+            messageId: message.id,
+            type: message.type,
+            textPreview: String(message.text || "").slice(0, 120)
+          });
+        }
 
         if (message.direction === "incoming" && message.from) {
           const interactionAt = registerCustomerInteraction(
