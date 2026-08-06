@@ -651,36 +651,24 @@ async function sendTemplateMessage(phone, templateName, parameters = []) {
     throw new Error("Nome do modelo de mensagem não configurado.");
   }
 
-  if (!META_ACCESS_TOKEN || !META_PHONE_NUMBER_ID) {
-    throw new Error(
-      "Configure META_ACCESS_TOKEN e META_PHONE_NUMBER_ID para enviar templates diretamente pela Meta."
-    );
-  }
-
   const payload = buildMetaTemplatePayload(
     phone,
     templateName,
     parameters
   );
 
-  console.log("[meta-template] enviando diretamente pela Graph API", {
+  console.log("[apollo-template] enviando", {
     phone: payload.to,
     template: payload.template.name,
-    language: payload.template.language.code,
-    hasImageHeader: payload.template.components.some(
-      component => component.type === "header"
-    )
+    language: payload.template.language.code
   });
 
-  const result = await metaRequest(
-    `${META_PHONE_NUMBER_ID}/messages`,
-    payload
-  );
+  const result = await apolloRequest(payload);
 
-  console.log("[meta-template] aceito pela Meta", {
+  console.log("[apollo-template] enviado", {
     phone: payload.to,
     template: payload.template.name,
-    messageId: result?.messages?.[0]?.id || null
+    messageId: result?.messages?.[0]?.id || result?.messageId || null
   });
 
   return result;
