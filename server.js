@@ -1235,7 +1235,6 @@ function buildCompleteOrderConfirmation(order) {
   const number = orderNumber(order);
   const totals = orderTotals(order);
   const type = deliveryType(order);
-  const estimate = deliveryEstimate(order);
   const payment = paymentLabel(order);
   const details = paymentDetails(order);
   const pix = isPixPayment(order);
@@ -1251,9 +1250,13 @@ function buildCompleteOrderConfirmation(order) {
         ? "🚨 *ATENÇÃO: PARTE DO PAGAMENTO PIX PENDENTE* 🚨"
         : "🚨 *ATENÇÃO: PAGAMENTO PIX PENDENTE* 🚨",
       "",
-      `💰 Valor a pagar no PIX: ${formatBRL(combined && pixAmount>0?pixAmount:totals.total)}`,
+      "⚠️ *SEU PEDIDO SÓ SERÁ CONFIRMADO APÓS O ENVIO E A CONFIRMAÇÃO DO COMPROVANTE PIX.*",
+      "",
+      `💰 Valor a pagar no PIX: ${formatBRL(combined && pixAmount > 0 ? pixAmount : totals.total)}`,
       `🔑 Chave PIX: ${PIX_KEY}`,
-      combined ? `A parte restante será paga em ${combinedOtherMethod(order)}.` : "Para liberarmos o preparo, envie o comprovante do PIX respondendo esta conversa.",
+      combined
+        ? `A parte restante será paga em ${combinedOtherMethod(order)}. Envie o comprovante da parte PIX respondendo esta conversa.`
+        : "📲 Envie o comprovante do PIX respondendo esta conversa.",
       ""
     );
   }
@@ -1261,7 +1264,9 @@ function buildCompleteOrderConfirmation(order) {
   lines.push(
     `🍔 Olá, ${name}!`,
     "",
-    `✅ Seu pedido #${number} foi recebido com sucesso.`,
+    pix
+      ? `📝 Seu pedido #${number} foi recebido e está aguardando a confirmação do PIX.`
+      : `✅ Seu pedido #${number} foi confirmado com sucesso.`,
     "",
     "🧾 *RESUMO DO PEDIDO*",
     "",
@@ -1275,39 +1280,7 @@ function buildCompleteOrderConfirmation(order) {
     ...details,
     "",
     `📍 ${type}:`,
-    type === "Retirada no local" ? "Ki-Burguer" : deliveryAddress(order),
-    "",
-    "⏱️ *PREVISÃO DE ENTREGA*",
-    `🕒 Em média: ${estimate.average}`,
-    `⏰ Tempo máximo estimado: ${estimate.maximum}`,
-    "",
-    "Nos horários de maior movimento esse prazo pode variar um pouco, mas nossa equipe fará o possível para entregar o mais rápido possível. 🍔🚀",
-    ""
-  );
-
-  if (pix) {
-    lines.push(
-      combinedPaymentHasPix(order)
-        ? "⏳ O pedido ficará aguardando somente a confirmação da parte paga no PIX."
-        : "⏳ Seu pedido ficará aguardando a confirmação do PIX.",
-      "",
-      combinedPaymentHasPix(order)
-        ? "🚨 *ENVIE O COMPROVANTE DA PARTE PIX PARA INICIARMOS O PREPARO* 🚨"
-        : "🚨 *ENVIE O COMPROVANTE PARA INICIARMOS O PREPARO* 🚨",
-      "",
-      "Assim que o pagamento for confirmado, avisaremos você por aqui e o pedido seguirá para a fila de preparo. 👨‍🍳🔥"
-    );
-  } else {
-    lines.push(
-      "👨‍🍳 Seu pedido já entrou na fila de preparo.",
-      "",
-      "Avisaremos por aqui quando houver uma nova atualização."
-    );
-  }
-
-  lines.push(
-    "",
-    "Obrigado por escolher a Ki-Burguer! 💚"
+    type === "Retirada no local" ? "Ki-Burguer" : deliveryAddress(order)
   );
 
   return lines.filter((line, index, array) => {
