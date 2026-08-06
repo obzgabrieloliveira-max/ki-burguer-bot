@@ -2429,6 +2429,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Graph API: ${GRAPH_API_VERSION}`);
   console.log("Janela de 24 horas: verificação preventiva ATIVA");
   console.log("Dentro da janela: mensagem normal pelo Apollo");
-  console.log("Fora da janela: template direto pela Meta Graph API");
+  console.log("Fora da janela: template via Apollo");
   console.log("Status Meta no webhook: ATIVO (sent/delivered/read/failed)");
 });
