@@ -76,7 +76,7 @@ const AUTO_REPLY_MESSAGE = String(
 ).replace(/\\n/g, "\n").trim();
 const CLOSED_REPLY_MESSAGE = String(
   process.env.CLOSED_REPLY_MESSAGE ||
-  `Olá! 🍔 Obrigado por entrar em contato com a Ki-Burguer.\n\nNo momento estamos fechados.\n\n🕒 Horário de atendimento:\n• Segunda: 18h30 às 22h30\n• Terça a quinta: 18h às 22h30\n• Sexta a domingo: 18h às 23h30\n\nAssim que abrirmos, será um prazer atender você! 😊`
+  `Olá! 🍔 Obrigado por entrar em contato com a Ki-Burguer.\n\nNo momento estamos fechados.\n\n🕒 Horário de atendimento:\n• Segunda: 18h às 22h30\n• Terça a quinta: 18h às 22h30\n• Sexta a domingo: 18h às 23h30\n\nAssim que abrirmos, será um prazer atender você! 😊`
 ).replace(/\\n/g, "\n").trim();
 
 // Sincronizado pela dashboard: automatic, manual_open ou manual_closed.
@@ -100,7 +100,7 @@ function isStoreOpenNow() {
 
   const { weekday, hour, minute } = saoPauloParts();
   const current = hour * 60 + minute;
-  const opening = weekday === "Mon" ? 18 * 60 + 30 : 18 * 60;
+  const opening = 18 * 60;
   const closing = ["Fri", "Sat", "Sun"].includes(weekday) ? 23 * 60 + 30 : 22 * 60 + 30;
   return current >= opening && current < closing;
 }
