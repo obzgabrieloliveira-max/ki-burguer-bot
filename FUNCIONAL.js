@@ -54,8 +54,6 @@ const TEMPLATE_NAMES = {
   pedido_entregue: String(process.env.TEMPLATE_PEDIDO_ENTREGUE || "pedido_entregue").trim()
 };
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
-const PIX_KEY = String(process.env.PIX_KEY||process.env.CHAVE_PIX||"50631675000107").trim();
-
 const AUTO_MESSAGE_IMAGE_URL = String(
   process.env.AUTO_MESSAGE_IMAGE_URL ||
   "https://site--ki-burguer-bot--789qjfp8g7wf.code.run/assets/logo-ki.jpg"
@@ -1233,9 +1231,9 @@ function buildCompleteOrderConfirmation(order) {
         ? "🚨 *ATENÇÃO: PARTE DO PAGAMENTO PIX PENDENTE* 🚨"
         : "🚨 *ATENÇÃO: PAGAMENTO PIX PENDENTE* 🚨",
       "",
-      `💰 Valor a pagar no PIX: ${formatBRL(combined && pixAmount>0?pixAmount:totals.total)}`,
-      `🔑 Chave PIX: ${PIX_KEY}`,
-      combined ? `A parte restante será paga em ${combinedOtherMethod(order)}.` : "Para liberarmos o preparo, envie o comprovante do PIX respondendo esta conversa.",
+      combined
+        ? `Envie o comprovante da parte no PIX${pixAmount > 0 ? ` (${formatBRL(pixAmount)})` : ""}. A parte restante será paga em ${combinedOtherMethod(order)}.`
+        : "Para liberarmos o preparo, envie o comprovante do PIX respondendo esta conversa.",
       ""
     );
   }
@@ -1347,8 +1345,7 @@ function statusTextMessage(order, status) {
         ``,
         `Olá, ${name}! Recebemos seu pedido com sucesso. 🍔`,
         ``,
-        `💰 *Valor a pagar no PIX: ${formatBRL(combinedPaymentHasPix(order)&&combinedPixAmount(order)>0?combinedPixAmount(order):totals.total)}*`,
-        `🔑 *Chave PIX:* ${PIX_KEY}`,
+        `💰 *Total do pedido: ${formatBRL(totals.total)}*`,
         ``,
         `📲 Envie o comprovante do PIX respondendo esta conversa.`,
         ``,
@@ -1363,8 +1360,7 @@ function statusTextMessage(order, status) {
         ``,
         `Olá, ${name}! Seu pedido foi recebido. 🍔`,
         ``,
-        `💰 *Valor a pagar no PIX: ${formatBRL(combinedPaymentHasPix(order)&&combinedPixAmount(order)>0?combinedPixAmount(order):totals.total)}*`,
-        `🔑 *Chave PIX:* ${PIX_KEY}`,
+        `💰 *Valor pendente: ${formatBRL(totals.total)}*`,
         ``,
         `📲 Envie o comprovante por esta conversa para liberarmos o preparo.`,
         ``,
