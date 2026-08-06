@@ -1312,7 +1312,15 @@ function initialOrderTemplate(order) {
   if (isPixPayment(order)) {
     return {
       name: TEMPLATE_NAMES.pedido_pix,
-      parameters: [orderName(order), orderNumber(order)]
+      parameters: [
+        orderName(order),
+        orderNumber(order),
+        formatBRL(
+          combinedPaymentHasPix(order) && combinedPixAmount(order) > 0
+            ? combinedPixAmount(order)
+            : orderTotals(order).total
+        )
+      ]
     };
   }
 
