@@ -43,10 +43,10 @@ const TEMPLATE_NAMES = {
   pedido_em_preparo: String(process.env.TEMPLATE_PEDIDO_EM_PREPARO || "pedido_em_preparo").trim(),
   pedido_status: String(process.env.TEMPLATE_PEDIDO_STATUS || "status_do_pedido1").trim(),
   pedido_confirmado: String(
-    process.env.TEMPLATE_PEDIDO_CONFIRMADO || "pedido_pagamento_confirmado"
+    process.env.TEMPLATE_PEDIDO_CONFIRMADO || "pedido_confirmado"
   ).trim(),
   pedido_pagamento_confirmado: String(
-    process.env.TEMPLATE_PEDIDO_PAGAMENTO_CONFIRMADO || "pedido_pagamento_confirmado"
+    process.env.TEMPLATE_PEDIDO_PAGAMENTO_CONFIRMADO || "pedido_confirmado"
   ).trim(),
   pedido_saiu_entrega: String(
     process.env.TEMPLATE_PEDIDO_SAIU_ENTREGA || "pedido_status1"
@@ -56,8 +56,7 @@ const TEMPLATE_NAMES = {
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
 const AUTO_MESSAGE_IMAGE_URL = String(
   process.env.AUTO_MESSAGE_IMAGE_URL ||
-  process.env.META_TEMPLATE_HEADER_IMAGE_URL ||
-  "https://ki-cardapio.netlify.app/meta-header.jpg"
+  "https://site--ki-burguer-bot--789qjfp8g7wf.code.run/assets/logo-ki.jpg"
 ).trim();
 
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
@@ -84,17 +83,51 @@ const MAX_RECEIVED_MESSAGES = 500;
 const customerServiceWindows = new Map();
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+function brazilianPhoneAliases(input) {
+  const normalized = normalizeBrazilianPhone(input);
+  const aliases = new Set([normalized]);
+
+  // O WhatsApp pode entregar celular brasileiro com ou sem o 9 após o DDD.
+  // Guardamos e consultamos as duas formas para preservar a janela de 24 horas.
+  if (normalized.startsWith("55")) {
+    const national = normalized.slice(2);
+
+    if (national.length === 11 && national[2] === "9") {
+      aliases.add(`55${national.slice(0, 2)}${national.slice(3)}`);
+    }
+
+    if (national.length === 10) {
+      aliases.add(`55${national.slice(0, 2)}9${national.slice(2)}`);
+    }
+  }
+
+  return [...aliases];
+}
+
 function registerCustomerInteraction(phone, timestamp = Date.now()) {
   try {
-    const normalizedPhone = normalizeBrazilianPhone(phone);
+    const aliases = brazilianPhoneAliases(phone);
     const numericTimestamp = Number(timestamp);
     const interactionAt = Number.isFinite(numericTimestamp)
       ? (numericTimestamp > 1e12 ? numericTimestamp : numericTimestamp * 1000)
       : Date.now();
 
-    customerServiceWindows.set(normalizedPhone, interactionAt || Date.now());
+    for (const alias of aliases) {
+      customerServiceWindows.set(alias, interactionAt || Date.now());
+    }
+
+    console.log("[window-24h] aliases registrados", {
+      original: String(phone || ""),
+      aliases,
+      interactionAt: new Date(interactionAt || Date.now()).toISOString()
+    });
+
     return interactionAt || Date.now();
-  } catch {
+  } catch (error) {
+    console.warn("[window-24h] não foi possível registrar interação", {
+      phone: String(phone || ""),
+      error: error.message
+    });
     return null;
   }
 }
@@ -112,14 +145,27 @@ function cleanupCustomerServiceWindows() {
 function customerServiceWindowStatus(phone) {
   cleanupCustomerServiceWindows();
 
-  const normalizedPhone = normalizeBrazilianPhone(phone);
-  const lastInteractionAt = customerServiceWindows.get(normalizedPhone) || 0;
+  const aliases = brazilianPhoneAliases(phone);
+  let matchedPhone = null;
+  let lastInteractionAt = 0;
+
+  for (const alias of aliases) {
+    const timestamp = customerServiceWindows.get(alias) || 0;
+
+    if (timestamp > lastInteractionAt) {
+      matchedPhone = alias;
+      lastInteractionAt = timestamp;
+    }
+  }
+
   const remainingMs = lastInteractionAt
     ? Math.max(0, CUSTOMER_SERVICE_WINDOW_MS - (Date.now() - lastInteractionAt))
     : 0;
 
   return {
-    phone: normalizedPhone,
+    phone: aliases[0],
+    aliases,
+    matchedPhone,
     open: remainingMs > 0,
     lastInteractionAt: lastInteractionAt
       ? new Date(lastInteractionAt).toISOString()
@@ -147,6 +193,13 @@ app.use(express.json({
   verify(req, _res, buffer) {
     req.rawBody = buffer;
   }
+}));
+
+// Imagem padrão da Ki-Burguer usada em todas as mensagens normais
+// enviadas dentro da janela de atendimento de 24 horas.
+app.use("/assets", express.static(require("path").join(__dirname, "assets"), {
+  maxAge: "7d",
+  immutable: false
 }));
 
 const configuredOrigins = ALLOWED_ORIGIN.split(",")
@@ -1263,6 +1316,9 @@ function initialOrderMessage(order) {
 }
 
 function initialOrderTemplate(order) {
+  // Fora da janela de 24 horas:
+  // - PIX antecipado ou combinar meios com parte em PIX -> pedido_pix1
+  // - dinheiro, débito, crédito, PIX na maquininha e demais -> pedido_confirmado
   if (isPixPayment(order)) {
     return {
       name: TEMPLATE_NAMES.pedido_pix,
@@ -1280,42 +1336,214 @@ function statusTextMessage(order, status) {
   const name = orderName(order);
   const number = orderNumber(order);
   const normalized = normalizeOrderStatus(status);
+  const totals = orderTotals(order);
 
   const messages = {
     aguardando_comprovante:
-      `💳✨ Olá, ${name}! O pedido #${number} foi recebido. Envie o comprovante do PIX por esta conversa para liberarmos o preparo. 🍔`,
+      [
+        `💳 *PIX PENDENTE — PEDIDO #${number}*`,
+        ``,
+        `Olá, ${name}! Recebemos seu pedido com sucesso. 🍔`,
+        ``,
+        `💰 *Total do pedido: ${formatBRL(totals.total)}*`,
+        ``,
+        `📲 Envie o comprovante do PIX respondendo esta conversa.`,
+        ``,
+        `⏳ Assim que o pagamento for confirmado, seu pedido será liberado para a fila de preparo.`,
+        ``,
+        `Obrigado por escolher a Ki-Burguer! 💚`
+      ].join("\n"),
+
+    pix_pendente:
+      [
+        `💳 *PIX PENDENTE — PEDIDO #${number}*`,
+        ``,
+        `Olá, ${name}! Seu pedido foi recebido. 🍔`,
+        ``,
+        `💰 *Valor pendente: ${formatBRL(totals.total)}*`,
+        ``,
+        `📲 Envie o comprovante por esta conversa para liberarmos o preparo.`,
+        ``,
+        `Estamos aguardando você. 💚`
+      ].join("\n"),
+
     pagamento_confirmado:
       [
-        `✅💚 Pagamento PIX confirmado, ${name}!`,
+        `✅ *PAGAMENTO CONFIRMADO*`,
         ``,
-        `O pagamento do pedido #${number} foi aprovado com sucesso.`,
+        `Olá, ${name}! O PIX do pedido #${number} foi confirmado com sucesso. 💚`,
         ``,
         `👨‍🍳 Seu pedido já foi liberado e entrou na fila de preparo.`,
         ``,
-        `⏱️ Previsão de entrega:`,
+        `⏱️ *Previsão de entrega*`,
         `🕒 Em média: 30 minutos`,
         `⏰ Tempo máximo estimado: 70 minutos`,
         ``,
-        `Avisaremos por aqui quando ele sair para entrega. 🛵💨`
+        `Avisaremos por aqui assim que houver uma nova atualização. 🍔`
       ].join("\n"),
+
+    novo:
+      [
+        `🍔 *PEDIDO #${number} RECEBIDO*`,
+        ``,
+        `Olá, ${name}! Seu pedido chegou certinho para a Ki-Burguer. 💚`,
+        ``,
+        `👨‍🍳 Nossa equipe já recebeu as informações e em breve iniciará o preparo.`,
+        ``,
+        `⏱️ Previsão média: 30 minutos`,
+        `⏰ Tempo máximo estimado: 70 minutos`,
+        ``,
+        `Acompanhe as próximas atualizações por aqui.`
+      ].join("\n"),
+
+    recebido:
+      [
+        `🍔 *PEDIDO #${number} RECEBIDO*`,
+        ``,
+        `Olá, ${name}! Recebemos seu pedido com sucesso. 💚`,
+        ``,
+        `👨‍🍳 Ele já está na fila da cozinha e será preparado com todo cuidado.`,
+        ``,
+        `Avisaremos você em cada etapa do pedido.`
+      ].join("\n"),
+
+    pedido_recebido:
+      [
+        `🍔 *PEDIDO #${number} RECEBIDO*`,
+        ``,
+        `Olá, ${name}! Está tudo certo com seu pedido. 💚`,
+        ``,
+        `👨‍🍳 A cozinha já recebeu as informações e o preparo começará em breve.`,
+        ``,
+        `Fique de olho nesta conversa para acompanhar o andamento.`
+      ].join("\n"),
+
+    confirmado:
+      [
+        `✅ *PEDIDO #${number} CONFIRMADO*`,
+        ``,
+        `Olá, ${name}! Seu pedido foi confirmado e já está seguindo para a cozinha. 🍔`,
+        ``,
+        `👨‍🍳 Em breve iniciaremos o preparo.`,
+        ``,
+        `Obrigado pela preferência! 💚`
+      ].join("\n"),
+
     preparo:
-      `👨‍🍳🔥 Seu pedido #${number} já está sendo preparado com todo carinho, ${name}! Daqui a pouco tem novidade. 😋`,
+      [
+        `👨‍🍳🔥 *PEDIDO EM PREPARO*`,
+        ``,
+        `Olá, ${name}! O pedido #${number} já está sendo preparado.`,
+        ``,
+        `Cada item está sendo feito com cuidado para chegar bem quentinho e saboroso. 🍔`,
+        ``,
+        `Assim que estiver pronto, avisaremos você por aqui. 💚`
+      ].join("\n"),
+
     em_preparo:
-      `👨‍🍳🔥 Seu pedido #${number} já está sendo preparado com todo carinho, ${name}! Daqui a pouco tem novidade. 😋`,
+      [
+        `👨‍🍳🔥 *PEDIDO EM PREPARO*`,
+        ``,
+        `Olá, ${name}! Temos uma boa notícia: o pedido #${number} já está na chapa.`,
+        ``,
+        `Nossa equipe está preparando tudo com muito capricho. 🍔`,
+        ``,
+        `Daqui a pouco tem nova atualização!`
+      ].join("\n"),
+
+    pronto:
+      [
+        `✅🍔 *PEDIDO PRONTO*`,
+        ``,
+        `Olá, ${name}! O pedido #${number} ficou pronto.`,
+        ``,
+        `📦 Estamos finalizando a embalagem para manter tudo organizado e quentinho.`,
+        ``,
+        `Em breve ele seguirá para entrega. 🛵💨`
+      ].join("\n"),
+
+    preparo_concluido:
+      [
+        `✅🍔 *PREPARO CONCLUÍDO*`,
+        ``,
+        `Olá, ${name}! Finalizamos o preparo do pedido #${number}.`,
+        ``,
+        `📦 Agora estamos conferindo e embalando tudo com cuidado.`,
+        ``,
+        `A próxima atualização será quando ele sair para entrega. 🛵💨`
+      ].join("\n"),
+
     saiu_entrega:
-      `🛵💨 Boa notícia, ${name}! O pedido #${number} saiu para entrega e já está a caminho. 🍔`,
+      [
+        `🛵💨 *SEU PEDIDO ESTÁ A CAMINHO*`,
+        ``,
+        `Olá, ${name}! O pedido #${number} saiu para entrega.`,
+        ``,
+        `📍 Nosso entregador já está a caminho do endereço informado.`,
+        ``,
+        `Pedimos que fique atento ao telefone e ao portão. 🍔`,
+        ``,
+        `Obrigado por escolher a Ki-Burguer! 💚`
+      ].join("\n"),
+
     saiu_para_entrega:
-      `🛵💨 Boa notícia, ${name}! O pedido #${number} saiu para entrega e já está a caminho. 🍔`,
+      [
+        `🛵💨 *SEU PEDIDO ESTÁ A CAMINHO*`,
+        ``,
+        `Olá, ${name}! O pedido #${number} acabou de sair para entrega.`,
+        ``,
+        `📍 Em breve ele chegará até você.`,
+        ``,
+        `Fique atento ao telefone. Obrigado pela preferência! 💚`
+      ].join("\n"),
+
     entregue:
-      `🎉🍔 Pedido #${number} entregue, ${name}! Esperamos que aproveite muito. Obrigado por escolher a Ki-Burguer! 💚`,
+      [
+        `🎉🍔 *PEDIDO ENTREGUE*`,
+        ``,
+        `Olá, ${name}! O pedido #${number} foi entregue com sucesso.`,
+        ``,
+        `Esperamos que você aproveite cada mordida. 😋`,
+        ``,
+        `Muito obrigado por escolher a Ki-Burguer! 💚`,
+        ``,
+        `Será um prazer receber seu próximo pedido.`
+      ].join("\n"),
+
     concluido:
-      `🎉🍔 Pedido #${number} concluído, ${name}! Esperamos que aproveite muito. Obrigado por escolher a Ki-Burguer! 💚`,
+      [
+        `🎉 *PEDIDO #${number} CONCLUÍDO*`,
+        ``,
+        `Olá, ${name}! Finalizamos seu atendimento com sucesso.`,
+        ``,
+        `Esperamos que tenha gostado do pedido. 🍔`,
+        ``,
+        `Obrigado pela confiança e até a próxima! 💚`
+      ].join("\n"),
+
     cancelado:
-      `❌ Olá, ${name}. O pedido #${number} foi cancelado. Caso precise de ajuda, responda esta conversa.`
+      [
+        `❌ *PEDIDO #${number} CANCELADO*`,
+        ``,
+        `Olá, ${name}. Seu pedido foi cancelado.`,
+        ``,
+        `Caso tenha alguma dúvida ou precise de ajuda, responda esta conversa para falar com nossa equipe.`,
+        ``,
+        `Ki-Burguer 💚`
+      ].join("\n")
   };
 
   return messages[normalized] ||
-    `🍔 Olá, ${name}! O status do pedido #${number} foi atualizado para: ${statusLabel(status)}.`;
+    [
+      `🍔 *ATUALIZAÇÃO DO PEDIDO #${number}*`,
+      ``,
+      `Olá, ${name}!`,
+      ``,
+      `O status do seu pedido foi atualizado para:`,
+      `*${statusLabel(status)}*`,
+      ``,
+      `Continuaremos avisando você por aqui. 💚`
+    ].join("\n");
 }
 function templateForOrderStatus(order, status) {
   const normalized = normalizeOrderStatus(status);
@@ -1750,7 +1978,13 @@ async function fetchMedia(message) {
   return { buffer: Buffer.from(await response.arrayBuffer()), contentType: response.headers.get("content-type") || message.mimeType || "application/octet-stream" };
 }
 
-app.get("/", (_req, res) => res.json({ ok: true, service: "Bot WhatsApp Ki-Burguer — Apollo Gateway", enabled: botEnabled, webhook: "/webhook" }));
+app.get("/", (_req, res) => res.json({
+  ok: true,
+  service: "Bot WhatsApp Ki-Burguer — Apollo Gateway",
+  enabled: botEnabled,
+  webhook: "/webhook",
+  automaticMessageImage: "https://site--ki-burguer-bot--789qjfp8g7wf.code.run/assets/logo-ki.jpg"
+}));
 app.get("/windows", requireApiKey, (_req, res) => {
   cleanupCustomerServiceWindows();
 
@@ -1819,17 +2053,28 @@ app.post("/order-created", requireApiKey, async (req, res) => {
     const phone = normalizeBrazilianPhone(rawPhone);
     const windowStatus = customerServiceWindowStatus(phone);
 
+    const pixRequired = isPixPayment(order);
+    const combinedPix = combinedPaymentHasPix(order);
+    const machinePix = isPixMachinePayment(order);
+
     console.log("[order-created] janela de 24 horas verificada", {
       order: orderNumber(order),
       phone,
+      phoneAliases: windowStatus.aliases,
+      matchedPhone: windowStatus.matchedPhone,
       windowOpen: windowStatus.open,
       lastInteractionAt: windowStatus.lastInteractionAt,
       remainingMinutes: Math.ceil(windowStatus.remainingMs / 60000),
-      payment: isPixPayment(order) ? "pix" : "outros"
+      payment: pixRequired
+        ? (combinedPix ? "combinar-meios-com-pix" : "pix-antecipado")
+        : (machinePix ? "pix-na-maquininha" : "outros")
     });
 
-    // Cliente falou nas últimas 24 horas:
-    // usa mensagem comum do bot, sem gastar template.
+    // DENTRO DA JANELA DE 24 HORAS:
+    // - PIX antecipado: mensagem normal com PIX pendente e valor total.
+    // - Combinar meios com PIX: cobra somente a parte em PIX.
+    // - PIX na maquininha, dinheiro, débito, crédito e outros:
+    //   mensagem normal de pedido recebido, sem cobrança PIX.
     if (windowStatus.open) {
       const message = initialOrderMessage(order);
 
@@ -1855,8 +2100,9 @@ app.post("/order-created", requireApiKey, async (req, res) => {
       });
     }
 
-    // Cliente nunca falou ou a última mensagem passou de 24 horas:
-    // envia o template aprovado diretamente.
+    // FORA DA JANELA DE 24 HORAS:
+    // - PIX antecipado ou combinar meios com PIX: TEMPLATE_PEDIDO_PIX.
+    // - Demais formas, inclusive PIX na maquininha: TEMPLATE_PEDIDO_CONFIRMADO.
     const selected = initialOrderTemplate(order);
 
     console.log("[order-created] fora da janela; enviando template Meta", {
@@ -2178,6 +2424,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor iniciado na porta ${PORT}`);
   console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
+  console.log(`Template PIX fora da janela: ${TEMPLATE_NAMES.pedido_pix}`);
+  console.log(`Template outros pagamentos fora da janela: ${TEMPLATE_NAMES.pedido_confirmado}`);
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
   console.log(`Apollo Send URL: ${APOLLO_SEND_URL ? "CONFIGURADA" : "NÃO CONFIGURADA"}`);
   console.log(`Apollo Auth Header: ${APOLLO_AUTH_HEADER || "x-api-key"}`);
