@@ -74,36 +74,6 @@ const AUTO_REPLY_MESSAGE = String(
   process.env.AUTO_REPLY_MESSAGE ||
   `Olá! 🍔 Seja bem-vindo(a) à Ki-Burguer!\n\nAqui você encontra seus lanches favoritos preparados com muito sabor. 😋\n\n📲 Confira o cardápio e faça seu pedido:\n${SITE_URL}\n\nSe precisar de ajuda, é só responder por aqui.`
 ).replace(/\\n/g, "\n").trim();
-const CLOSED_REPLY_MESSAGE = String(
-  process.env.CLOSED_REPLY_MESSAGE ||
-  `Olá! 🍔 Obrigado por entrar em contato com a Ki-Burguer.\n\nNo momento estamos fechados.\n\n🕒 Horário de atendimento:\n• Segunda: 18h30 às 22h30\n• Terça a quinta: 18h às 22h30\n• Sexta a domingo: 18h às 23h30\n\nAssim que abrirmos, será um prazer atender você! 😊`
-).replace(/\\n/g, "\n").trim();
-
-// Sincronizado pela dashboard: automatic, manual_open ou manual_closed.
-let storeControlMode = "automatic";
-
-function saoPauloParts(date = new Date()) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Sao_Paulo",
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(date);
-  const value = type => parts.find(part => part.type === type)?.value || "";
-  return { weekday: value("weekday"), hour: Number(value("hour")), minute: Number(value("minute")) };
-}
-
-function isStoreOpenNow() {
-  if (storeControlMode === "manual_open") return true;
-  if (storeControlMode === "manual_closed") return false;
-
-  const { weekday, hour, minute } = saoPauloParts();
-  const current = hour * 60 + minute;
-  const opening = weekday === "Mon" ? 18 * 60 + 30 : 18 * 60;
-  const closing = ["Fri", "Sat", "Sun"].includes(weekday) ? 23 * 60 + 30 : 22 * 60 + 30;
-  return current >= opening && current < closing;
-}
 
 let botEnabled = String(process.env.BOT_ENABLED || "true").toLowerCase() !== "false";
 const ALLOW_REMOTE_SHUTDOWN = String(process.env.ALLOW_REMOTE_SHUTDOWN || "false").toLowerCase() === "true";
@@ -2058,20 +2028,6 @@ app.post("/toggle", requireApiKey, (req, res) => {
   res.json({ ok: true, enabled: botEnabled, message: botEnabled ? "Automação ligada." : "Automação desligada." });
 });
 
-app.get("/store-control", requireApiKey, (_req, res) => {
-  res.json({ ok: true, mode: storeControlMode, open: isStoreOpenNow() });
-});
-
-app.post("/store-control", requireApiKey, (req, res) => {
-  const mode = String(req.body?.mode || "").trim();
-  if (!["automatic", "manual_open", "manual_closed"].includes(mode)) {
-    return res.status(400).json({ ok: false, error: "Modo de funcionamento inválido." });
-  }
-  storeControlMode = mode;
-  console.log(`[store-control] modo atualizado: ${mode}; loja ${isStoreOpenNow() ? "ABERTA" : "FECHADA"}`);
-  res.json({ ok: true, mode: storeControlMode, open: isStoreOpenNow() });
-});
-
 app.post("/send-new-site", requireApiKey, async (req, res) => {
   try {
     if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
@@ -2418,21 +2374,15 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        const storeOpen = isStoreOpenNow();
-        const automaticReply = storeOpen ? AUTO_REPLY_MESSAGE : CLOSED_REPLY_MESSAGE;
-
         console.log("[auto-reply] respondendo cliente", {
           phone: message.from,
           type: message.type,
-          messageId: message.id,
-          storeMode: storeControlMode,
-          storeOpen,
-          replyType: storeOpen ? "boas-vindas" : "fechado"
+          messageId: message.id
         });
 
         try {
           await trackedSend(() =>
-            sendDecoratedMessage(message.from, automaticReply, message.id)
+            sendDecoratedMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
           );
 
           console.log("[auto-reply] resposta com imagem enviada", {
@@ -2446,7 +2396,7 @@ app.post("/webhook", (req, res) => {
           });
 
           await trackedSend(() =>
-            sendTextMessage(message.from, automaticReply, message.id)
+            sendTextMessage(message.from, AUTO_REPLY_MESSAGE, message.id)
           );
 
           console.log("[auto-reply] resposta em texto enviada", {
