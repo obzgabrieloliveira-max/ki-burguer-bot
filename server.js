@@ -115,6 +115,11 @@ const MAX_RECEIVED_MESSAGES = 500;
 const customerServiceWindows = new Map();
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+// Evita repetir boas-vindas/loja fechada para o mesmo cliente.
+// Cada número recebe no máximo 1 resposta automática desse tipo a cada 6 horas.
+const autoReplyCooldowns = new Map();
+const AUTO_REPLY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+
 function brazilianPhoneAliases(input) {
   const normalized = normalizeBrazilianPhone(input);
   const aliases = new Set([normalized]);
@@ -204,6 +209,45 @@ function customerServiceWindowStatus(phone) {
       : null,
     remainingMs
   };
+}
+
+
+function cleanupAutoReplyCooldowns() {
+  const now = Date.now();
+  for (const [phone, timestamp] of autoReplyCooldowns.entries()) {
+    if (!timestamp || now - timestamp >= AUTO_REPLY_COOLDOWN_MS) {
+      autoReplyCooldowns.delete(phone);
+    }
+  }
+}
+
+function autoReplyCooldownStatus(phone) {
+  cleanupAutoReplyCooldowns();
+
+  const aliases = brazilianPhoneAliases(phone);
+  let lastSentAt = 0;
+
+  for (const alias of aliases) {
+    const timestamp = autoReplyCooldowns.get(alias) || 0;
+    if (timestamp > lastSentAt) lastSentAt = timestamp;
+  }
+
+  const remainingMs = lastSentAt
+    ? Math.max(0, AUTO_REPLY_COOLDOWN_MS - (Date.now() - lastSentAt))
+    : 0;
+
+  return {
+    allowed: remainingMs <= 0,
+    lastSentAt: lastSentAt ? new Date(lastSentAt).toISOString() : null,
+    remainingMs
+  };
+}
+
+function registerAutoReplySent(phone, timestamp = Date.now()) {
+  const aliases = brazilianPhoneAliases(phone);
+  for (const alias of aliases) {
+    autoReplyCooldowns.set(alias, timestamp);
+  }
 }
 
 function validateConfiguration() {
@@ -2391,6 +2435,17 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
+        const cooldown = autoReplyCooldownStatus(message.from);
+
+        if (!cooldown.allowed) {
+          console.log("[auto-reply] bloqueada pelo intervalo de 6 horas", {
+            phone: normalizeBrazilianPhone(message.from),
+            lastSentAt: cooldown.lastSentAt,
+            remainingMinutes: Math.ceil(cooldown.remainingMs / 60000)
+          });
+          return;
+        }
+
         const storeOpen = isStoreOpenNow();
         const automaticReply = storeOpen ? AUTO_REPLY_MESSAGE : CLOSED_REPLY_MESSAGE;
 
@@ -2400,13 +2455,16 @@ app.post("/webhook", (req, res) => {
           messageId: message.id,
           storeMode: storeControlMode,
           storeOpen,
-          replyType: storeOpen ? "boas-vindas" : "fechado"
+          replyType: storeOpen ? "boas-vindas" : "fechado",
+          cooldownHours: 6
         });
 
         try {
           await trackedSend(() =>
             sendDecoratedMessage(message.from, automaticReply, message.id)
           );
+
+          registerAutoReplySent(message.from);
 
           console.log("[auto-reply] resposta com imagem enviada", {
             phone: message.from
@@ -2421,6 +2479,8 @@ app.post("/webhook", (req, res) => {
           await trackedSend(() =>
             sendTextMessage(message.from, automaticReply, message.id)
           );
+
+          registerAutoReplySent(message.from);
 
           console.log("[auto-reply] resposta em texto enviada", {
             phone: message.from
