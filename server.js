@@ -61,7 +61,11 @@ const TEMPLATE_NAMES = {
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
 const PIX_KEY = String(process.env.PIX_KEY||process.env.CHAVE_PIX||"50631675000107").trim();
 
-const AUTO_MESSAGE_IMAGE_URL = "";
+const AUTO_MESSAGE_IMAGE_URL = String(
+  process.env.AUTO_MESSAGE_IMAGE_URL ||
+  process.env.HEADER_IMAGE_SOURCE_URL ||
+  "https://ki-pedidos.netlify.app/logo-ki.jpg"
+).trim();
 
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
   process.env.HUMAN_SUPPORT_BUTTON_TEXT || "Falar com Atendente"
@@ -72,7 +76,17 @@ const HUMAN_SUPPORT_REPLY = String(
 ).replace(/\\n/g, "\n").trim();
 
 const SITE_URL = String(process.env.SITE_URL || "https://ki-pedidos.netlify.app/").trim();
-const AUTO_REPLY_MESSAGE = `📲 Faça seu pedido pelo nosso cardápio:\n${SITE_URL}`;
+const AUTO_REPLY_MESSAGE = String(
+  process.env.AUTO_REPLY_MESSAGE ||
+  `Olá! 🍔 Seja bem-vindo(a) à Ki-Burguer!
+
+Aqui você encontra seus lanches favoritos preparados com muito sabor. 😋
+
+📲 Confira o cardápio e faça seu pedido:
+${SITE_URL}
+
+Se precisar de ajuda, é só responder por aqui.`
+).replace(/\\n/g, "\n").trim();
 
 const CLOSED_AUTO_REPLY_MESSAGE = `Olá! A Ki-Burguer está fechada no momento 🍔
 Confira nosso horário e envie sua mensagem novamente quando estivermos abertos.
@@ -1066,28 +1080,32 @@ function itemAddonsTotal(item) {
 }
 
 function itemBaseDisplayTotal(item) {
-  // Exibe SOMENTE o valor base do produto.
-  // Os adicionais continuam listados separadamente e não entram no valor
-  // mostrado ao lado do nome do item.
   const quantity = itemQuantity(item);
-  const unitBasePrice = itemUnitPrice(item);
+  const shownUnit = itemUnitPrice(item);
+  const paidAddons = itemAddonsTotal(item);
 
-  // Quando o pedido informa o preço unitário, ele é a referência mais segura
-  // para o preço base do produto, mesmo que total/subtotal já venha com
-  // adicionais somados.
-  if (unitBasePrice > 0) {
-    return unitBasePrice * quantity;
+  // A dashboard/cardápio salva o preço do item com os adicionais embutidos.
+  // Para a mensagem, o produto e os adicionais devem aparecer com valores separados.
+  // Ex.: X-Burguer R$ 20 + Bacon R$ 4 -> produto R$ 20 e adicional R$ 4.
+  if (shownUnit > 0) {
+    const baseUnit = Math.max(0, shownUnit - (paidAddons / quantity));
+    return baseUnit * quantity;
   }
 
-  // Fallback para estruturas que não enviam preço unitário.
-  const fullItemTotal = itemTotal(item);
-  const addonsTotal = itemAddonsTotal(item);
+  // Fallback caso o preço unitário não exista.
+  const explicitTotal = toNumber(
+    item?.total ??
+    item?.subtotal ??
+    item?.total_price ??
+    item?.valor_total ??
+    0
+  );
 
-  if (addonsTotal > 0 && fullItemTotal > addonsTotal) {
-    return Math.max(0, fullItemTotal - addonsTotal);
+  if (explicitTotal > 0) {
+    return Math.max(0, explicitTotal - paidAddons);
   }
 
-  return Math.max(0, fullItemTotal);
+  return 0;
 }
 
 function addonLabel(addon) {
@@ -2522,15 +2540,25 @@ app.post("/webhook", (req, res) => {
           cooldownHours: 6
         });
 
-        await trackedSend(() =>
-          sendTextMessage(message.from, automaticReply, message.id)
-        );
+        await trackedSend(() => {
+          if (replyType === "greeting-link" && AUTO_MESSAGE_IMAGE_URL) {
+            return sendImageMessage(
+              message.from,
+              AUTO_MESSAGE_IMAGE_URL,
+              automaticReply,
+              message.id
+            );
+          }
+
+          return sendTextMessage(message.from, automaticReply, message.id);
+        });
 
         registerAutoReplySent(message.from);
 
         console.log("[auto-reply] resposta enviada", {
           phone: message.from,
-          replyType
+          replyType,
+          withImage: replyType === "greeting-link" && Boolean(AUTO_MESSAGE_IMAGE_URL)
         });
       } catch (error) {
         console.error("[auto-reply] erro ao processar webhook Apollo:", {
