@@ -2233,8 +2233,8 @@ app.post("/send-new-site", requireApiKey, (_req, res) => {
 });
 app.post("/order-created", requireApiKey, async (req, res) => {
   // Pedido concluído:
-  // - dentro da janela de 24h: não envia nada;
-  // - fora da janela de 24h: envia somente o template aprovado correspondente.
+  // - dentro da janela de 24h: envia mensagem normal completa com os valores corretos;
+  // - fora da janela de 24h: envia o template aprovado correspondente.
   const order = req.body?.order || req.body || {};
 
   try {
@@ -2244,22 +2244,6 @@ app.post("/order-created", requireApiKey, async (req, res) => {
 
     const phone = normalizeBrazilianPhone(orderPhone(order));
     const windowStatus = customerServiceWindowStatus(phone);
-
-    if (windowStatus.open) {
-      console.log("[order-created] dentro da janela de 24h; nenhum envio", {
-        order: orderNumber(order),
-        phone,
-        lastInteractionAt: windowStatus.lastInteractionAt
-      });
-
-      return res.json({
-        ok: true,
-        skipped: true,
-        reason: "inside-24h-no-message",
-        windowOpen: true,
-        phone
-      });
-    }
 
     const orderMessageKey = isPixPayment(order) ? "order_pix" : "order_confirmed";
 
@@ -2277,6 +2261,30 @@ app.post("/order-created", requireApiKey, async (req, res) => {
         messageKey: orderMessageKey,
         windowOpen: false,
         phone
+      });
+    }
+
+    if (windowStatus.open) {
+      const message = initialOrderMessage(order);
+
+      console.log("[order-created] dentro da janela de 24h; enviando mensagem normal", {
+        order: orderNumber(order),
+        phone,
+        messageKey: orderMessageKey,
+        lastInteractionAt: windowStatus.lastInteractionAt
+      });
+
+      const result = await trackedSend(() =>
+        sendTextMessage(phone, message)
+      );
+
+      return res.json({
+        ok: true,
+        mode: "text-inside-24h",
+        messageKey: orderMessageKey,
+        windowOpen: true,
+        phone,
+        messageId: responseMessageId(result)
       });
     }
 
