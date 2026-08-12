@@ -1,8 +1,3 @@
-// KI-BURGUER — MODO REATIVO MÍNIMO
-// Único envio automático: quando o CLIENTE envia uma mensagem, responde com o link do cardápio.
-// Trava: no máximo 1 resposta automática por cliente a cada 6 horas.
-// Sem imagem, sem status e sem broadcast. Template de pedido somente fora da janela de 24h.
-
 require("dotenv").config();
 
 const crypto = require("crypto");
@@ -61,7 +56,10 @@ const TEMPLATE_NAMES = {
 const TEMPLATE_HEADER_IMAGE_URL = String(process.env.META_TEMPLATE_HEADER_IMAGE_URL || "").trim();
 const PIX_KEY = String(process.env.PIX_KEY||process.env.CHAVE_PIX||"50631675000107").trim();
 
-const AUTO_MESSAGE_IMAGE_URL = "";
+const AUTO_MESSAGE_IMAGE_URL = String(
+  process.env.AUTO_MESSAGE_IMAGE_URL ||
+  "https://site--ki-burguer-bot--789qjfp8g7wf.code.run/assets/logo-ki.jpg"
+).trim();
 
 const HUMAN_SUPPORT_BUTTON_TEXT = String(
   process.env.HUMAN_SUPPORT_BUTTON_TEXT || "Falar com Atendente"
@@ -72,7 +70,15 @@ const HUMAN_SUPPORT_REPLY = String(
 ).replace(/\\n/g, "\n").trim();
 
 const SITE_URL = String(process.env.SITE_URL || "https://ki-pedidos.netlify.app/").trim();
-const AUTO_REPLY_MESSAGE = `📲 Faça seu pedido pelo nosso cardápio:\n${SITE_URL}`;
+const AUTO_REPLY_MESSAGE = String(
+  process.env.AUTO_REPLY_MESSAGE ||
+  `Olá! 🍔 Seja bem-vindo(a) à Ki-Burguer!\n\nAqui você encontra seus lanches favoritos preparados com muito sabor. 😋\n\n📲 Confira o cardápio e faça seu pedido:\n${SITE_URL}\n\nSe precisar de ajuda, é só responder por aqui.`
+).replace(/\\n/g, "\n").trim();
+const CLOSED_REPLY_MESSAGE = String(
+  process.env.CLOSED_REPLY_MESSAGE ||
+  `Olá! 🍔 Obrigado por entrar em contato com a Ki-Burguer.\n\nNo momento estamos fechados.\n\n🕒 Horário de atendimento:\n• Segunda: 18h às 22h30\n• Terça a quinta: 18h às 22h30\n• Sexta a domingo: 18h às 23h30\n\nAssim que abrirmos, será um prazer atender você! 😊`
+).replace(/\\n/g, "\n").trim();
+
 // Sincronizado pela dashboard: automatic, manual_open ou manual_closed.
 let storeControlMode = "automatic";
 
@@ -109,7 +115,7 @@ const MAX_RECEIVED_MESSAGES = 500;
 const customerServiceWindows = new Map();
 const CUSTOMER_SERVICE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-// Evita repetir a resposta automática do link para o mesmo cliente.
+// Evita repetir boas-vindas/loja fechada para o mesmo cliente.
 // Cada número recebe no máximo 1 resposta automática desse tipo a cada 6 horas.
 const autoReplyCooldowns = new Map();
 const AUTO_REPLY_COOLDOWN_MS = 6 * 60 * 60 * 1000;
@@ -249,6 +255,8 @@ function validateConfiguration() {
   if (!API_KEY || API_KEY === "troque-por-uma-senha-forte") missing.push("BOT_API_KEY");
   if (!APOLLO_SEND_URL) missing.push("APOLLO_SEND_URL");
   if (!APOLLO_API_KEY) missing.push("APOLLO_API_KEY");
+  if (!META_ACCESS_TOKEN) missing.push("META_ACCESS_TOKEN");
+  if (!META_PHONE_NUMBER_ID) missing.push("META_PHONE_NUMBER_ID");
   if (missing.length) {
     console.error(`\nERRO: configure no Render/.env: ${missing.join(", ")}\n`);
     process.exit(1);
@@ -976,49 +984,6 @@ function itemAddons(item) {
   return [];
 }
 
-function itemAddonsTotal(item) {
-  return itemAddons(item).reduce((sum, addon) => {
-    if (!addon || typeof addon === "string") return sum;
-
-    const quantity = Math.max(1, Number(
-      addon?.quantity ??
-      addon?.qty ??
-      addon?.quantidade ??
-      addon?.qtd ??
-      1
-    ) || 1);
-
-    const explicitTotal = toNumber(
-      addon?.total ??
-      addon?.subtotal ??
-      addon?.total_price ??
-      addon?.valor_total ??
-      0
-    );
-
-    if (explicitTotal > 0) return sum + explicitTotal;
-
-    const unitPrice = toNumber(
-      addon?.unit_price ??
-      addon?.unitPrice ??
-      addon?.price ??
-      addon?.preco ??
-      addon?.valor ??
-      0
-    );
-
-    return sum + unitPrice * quantity;
-  }, 0);
-}
-
-function itemBaseDisplayTotal(item) {
-  // O valor recebido do item pode vir com os adicionais já somados.
-  // Na mensagem automática, mostramos o produto e os adicionais separados.
-  const fullItemTotal = itemTotal(item);
-  const addonsTotal = itemAddonsTotal(item);
-  return Math.max(0, fullItemTotal - addonsTotal);
-}
-
 function addonLabel(addon) {
   if (typeof addon === "string") return addon.trim();
 
@@ -1055,7 +1020,7 @@ function formatItemsBlock(order) {
   return items.map(item => {
     const quantity = itemQuantity(item);
     const name = itemName(item);
-    const total = itemBaseDisplayTotal(item);
+    const total = itemTotal(item);
     const addons = itemAddons(item)
       .map(addonLabel)
       .filter(Boolean);
@@ -2082,21 +2047,26 @@ app.get("/windows", requireApiKey, (_req, res) => {
 });
 
 app.get("/status", requireApiKey, (_req, res) => {
-  const configured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
+  const apolloConfigured = Boolean(APOLLO_SEND_URL && APOLLO_API_KEY);
+  const metaConfigured = Boolean(META_ACCESS_TOKEN && META_PHONE_NUMBER_ID);
+  const configured = apolloConfigured && metaConfigured;
+
+  cleanupCustomerServiceWindows();
 
   res.json({
     ok: true,
     enabled: botEnabled,
     configured,
     ready: configured,
-    state: configured ? "Resposta reativa pronta" : "Transporte Apollo não configurado",
+    state: configured
+      ? "Apollo conectado + Meta direta configurada"
+      : "Configuração incompleta",
     sent: botStats.sent,
     failed: botStats.failed,
     received: botStats.received,
+    open24hWindows: customerServiceWindows.size,
     startedAt: botStats.startedAt,
-    provider: "apollo-link-plus-template-outside-24h",
-    autoReply: "link-cardapio",
-    cooldownHours: 6
+    provider: "apollo+meta-direct", apolloConfigured, metaConfigured
   });
 });
 app.post("/toggle", requireApiKey, (req, res) => {
@@ -2119,42 +2089,84 @@ app.post("/store-control", requireApiKey, (req, res) => {
   res.json({ ok: true, mode: storeControlMode, open: isStoreOpenNow() });
 });
 
-app.post("/send-new-site", requireApiKey, (_req, res) => {
-  return res.status(410).json({ ok: false, disabled: true, reason: "reactive-link-only" });
+app.post("/send-new-site", requireApiKey, async (req, res) => {
+  try {
+    if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
+    const phone = normalizeBrazilianPhone(req.body?.phone);
+    const name = String(req.body?.name || req.body?.nome || "Cliente").trim() || "Cliente";
+    const parameters = Array.isArray(req.body?.parameters) ? req.body.parameters : [name];
+    const result = await trackedSend(() => sendTemplateMessage(phone, TEMPLATE_NAMES.novo_site, parameters));
+    res.json({ ok: true, phone, template: TEMPLATE_NAMES.novo_site, messageId: responseMessageId(result) });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.meta || error.apollo }); }
 });
 app.post("/order-created", requireApiKey, async (req, res) => {
-  // Pedido concluído:
-  // - dentro da janela de 24h: não envia nada;
-  // - fora da janela de 24h: envia somente o template aprovado correspondente.
-  const order = req.body?.order || req.body || {};
+  const order = req.body?.order || req.body;
+  const rawPhone = orderPhone(order);
 
   try {
     if (!botEnabled) {
-      return res.status(409).json({ ok: false, error: "A automação está desligada." });
+      return res.status(409).json({
+        ok: false,
+        error: "A automação está desligada."
+      });
     }
 
-    const phone = normalizeBrazilianPhone(orderPhone(order));
+    const phone = normalizeBrazilianPhone(rawPhone);
     const windowStatus = customerServiceWindowStatus(phone);
 
+    const pixRequired = isPixPayment(order);
+    const combinedPix = combinedPaymentHasPix(order);
+    const machinePix = isPixMachinePayment(order);
+
+    console.log("[order-created] janela de 24 horas verificada", {
+      order: orderNumber(order),
+      phone,
+      phoneAliases: windowStatus.aliases,
+      matchedPhone: windowStatus.matchedPhone,
+      windowOpen: windowStatus.open,
+      lastInteractionAt: windowStatus.lastInteractionAt,
+      remainingMinutes: Math.ceil(windowStatus.remainingMs / 60000),
+      payment: pixRequired
+        ? (combinedPix ? "combinar-meios-com-pix" : "pix-antecipado")
+        : (machinePix ? "pix-na-maquininha" : "outros")
+    });
+
+    // DENTRO DA JANELA DE 24 HORAS:
+    // - PIX antecipado: mensagem normal com PIX pendente e valor total.
+    // - Combinar meios com PIX: cobra somente a parte em PIX.
+    // - PIX na maquininha, dinheiro, débito, crédito e outros:
+    //   mensagem normal de pedido recebido, sem cobrança PIX.
     if (windowStatus.open) {
-      console.log("[order-created] dentro da janela de 24h; nenhum envio", {
+      const message = initialOrderMessage(order);
+
+      const result = await trackedSend(() =>
+        sendDecoratedMessage(phone, message)
+      );
+
+      console.log("[order-created] mensagem comum enviada dentro da janela", {
         order: orderNumber(order),
         phone,
+        media: AUTO_MESSAGE_IMAGE_URL ? "image" : "text",
         lastInteractionAt: windowStatus.lastInteractionAt
       });
 
       return res.json({
         ok: true,
-        skipped: true,
-        reason: "inside-24h-no-message",
+        mode: AUTO_MESSAGE_IMAGE_URL
+          ? "normal-image-message"
+          : "normal-message",
         windowOpen: true,
-        phone
+        phone,
+        messageId: responseMessageId(result)
       });
     }
 
+    // FORA DA JANELA DE 24 HORAS:
+    // - PIX antecipado ou combinar meios com PIX: TEMPLATE_PEDIDO_PIX.
+    // - Demais formas, inclusive PIX na maquininha: TEMPLATE_PEDIDO_CONFIRMADO.
     const selected = initialOrderTemplate(order);
 
-    console.log("[order-created] fora da janela de 24h; enviando template", {
+    console.log("[order-created] fora da janela; enviando template Meta", {
       order: orderNumber(order),
       phone,
       template: selected.name,
@@ -2163,19 +2175,29 @@ app.post("/order-created", requireApiKey, async (req, res) => {
     });
 
     const result = await trackedSend(() =>
-      sendTemplateMessage(phone, selected.name, selected.parameters)
+      sendTemplateMessage(
+        phone,
+        selected.name,
+        selected.parameters
+      )
     );
+
+    console.log("[order-created] template Meta enviado", {
+      order: orderNumber(order),
+      phone,
+      template: selected.name
+    });
 
     return res.json({
       ok: true,
-      mode: "template-outside-24h",
+      mode: "meta-template",
       windowOpen: false,
       phone,
       template: selected.name,
       messageId: responseMessageId(result)
     });
   } catch (error) {
-    console.error("[order-created] falha ao processar template", {
+    console.error("[order-created] falha total", {
       order: orderNumber(order),
       error: error.message,
       details: error.meta || error.apollo || null
@@ -2184,30 +2206,97 @@ app.post("/order-created", requireApiKey, async (req, res) => {
     return res.status(error.status || 500).json({
       ok: false,
       error: error.message,
-      details: error.meta || error.apollo || null
+      details: error.meta || error.apollo
     });
   }
 });
 app.post("/send-status", requireApiKey, async (req, res) => {
-  // Atualizações automáticas de status estão temporariamente desativadas.
-  // Retorna OK para preservar compatibilidade com a dashboard.
   const order = req.body?.order || {};
   const status = req.body?.status;
-  console.log("[send-status] envio automático de status desativado", {
+  const phone = orderPhone(order);
+
+  console.log("[send-status] recebido", {
     order: orderNumber(order),
+    phone: phone ? normalizeBrazilianPhone(phone) : "",
     status: normalizeOrderStatus(status)
   });
-  return res.json({
-    ok: true,
-    skipped: true,
-    reason: "status-messages-disabled"
-  });
+
+  try {
+    if (!botEnabled) {
+      return res.status(409).json({
+        ok: false,
+        error: "A automação está desligada."
+      });
+    }
+
+    const normalizedPhone = normalizeBrazilianPhone(phone);
+    const message = statusTextMessage(order, status);
+    const result = await trackedSend(() =>
+      sendDecoratedMessage(normalizedPhone, message)
+    );
+
+    console.log("[send-status] mensagem automática enviada", {
+      order: orderNumber(order),
+      phone: normalizedPhone,
+      status: normalizeOrderStatus(status),
+      media: AUTO_MESSAGE_IMAGE_URL ? "image" : "text"
+    });
+
+    return res.json({
+      ok: true,
+      mode: AUTO_MESSAGE_IMAGE_URL
+        ? "normal-image-message"
+        : "normal-message",
+      phone: normalizedPhone,
+      status: normalizeOrderStatus(status),
+      messageId: responseMessageId(result)
+    });
+  } catch (error) {
+    console.error("[send-status] mensagem automática falhou", {
+      order: orderNumber(order),
+      status: normalizeOrderStatus(status),
+      error: error.message,
+      details: error.meta || error.apollo || null
+    });
+
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message,
+      details: error.meta || error.apollo
+    });
+  }
 });
-app.post("/send", requireApiKey, (_req, res) => {
-  return res.status(410).json({ ok: false, disabled: true, reason: "reactive-link-only" });
+app.post("/send", requireApiKey, async (req, res) => {
+  try {
+    const phone = normalizeBrazilianPhone(req.body?.phone);
+    const message = cleanMessage(req.body?.message);
+    // Envio manual continua disponível mesmo com automação pausada.
+    const result = await trackedSend(() => sendTextMessage(phone, message));
+    receivedMessages.unshift({ id: responseMessageId(result) || `local-${Date.now()}`, phone, name: String(req.body?.name || "Cliente"), type: "text", text: message, mediaId: "", mediaUrl: "", mimeType: "", filename: "", voice: false, direction: "outgoing", status: "sent", receivedAt: new Date().toISOString(), read: true });
+    res.json({ ok: true, phone, messageId: responseMessageId(result) });
+  } catch (error) { res.status(error.status || 500).json({ ok: false, error: error.message, details: error.meta || error.apollo }); }
 });
-app.post("/broadcast", requireApiKey, (_req, res) => {
-  return res.status(410).json({ ok: false, disabled: true, reason: "reactive-link-only" });
+app.post("/broadcast", requireApiKey, async (req, res) => {
+  if (!botEnabled) return res.status(409).json({ ok: false, error: "A automação está desligada." });
+  let message;
+  try { message = cleanMessage(req.body?.message); } catch (error) { return res.status(400).json({ ok: false, error: error.message }); }
+  const unique = new Map();
+  for (const recipient of (Array.isArray(req.body?.recipients) ? req.body.recipients : []).slice(0, 500)) {
+    try { const phone = normalizeBrazilianPhone(recipient?.phone || recipient); if (!unique.has(phone)) unique.set(phone, { phone, name: String(recipient?.name || "Cliente") }); } catch {}
+  }
+  const recipients = [...unique.values()];
+  if (!recipients.length) return res.status(400).json({ ok: false, error: "Nenhum destinatário válido foi informado." });
+  const delayMs = Math.min(60000, Math.max(1000, Number(req.body?.delayMs) || 5000));
+  let sent = 0, failed = 0; const errors = [];
+  for (let i = 0; i < recipients.length; i += 1) {
+    const recipient = recipients[i];
+    try {
+      const personalized = message.replace(/\{\{nome\}\}/gi, recipient.name).replace(/\{\{telefone\}\}/gi, recipient.phone);
+      await trackedSend(() => sendTextMessage(recipient.phone, personalized)); sent += 1;
+    } catch (error) { failed += 1; errors.push({ phone: recipient.phone, error: error.message }); }
+    if (i < recipients.length - 1) await wait(delayMs);
+  }
+  res.json({ ok: true, total: recipients.length, sent, failed, errors: errors.slice(0, 20) });
 });
 
 app.get("/messages", requireApiKey, (req, res) => {
@@ -2237,9 +2326,30 @@ app.post("/shutdown", requireApiKey, (_req, res) => {
   res.json({ ok: true, message: "Servidor será encerrado." }); setTimeout(() => process.exit(0), 400);
 });
 
-// Webhook usado somente para receber eventos do gateway e responder ao cliente.
-app.get("/webhook", (_req, res) => {
-  return res.status(200).json({ ok: true, provider: "apollo", mode: "link-6h-plus-template-outside-24h" });
+// Verificação do webhook pela Meta e teste simples do Apollo.
+app.get("/webhook", (req, res) => {
+  const mode = String(req.query["hub.mode"] || "");
+  const token = String(req.query["hub.verify_token"] || "");
+  const challenge = String(req.query["hub.challenge"] || "");
+
+  if (
+    mode === "subscribe" &&
+    META_VERIFY_TOKEN &&
+    token === META_VERIFY_TOKEN
+  ) {
+    console.log("Webhook verificado pela Meta.");
+    return res.status(200).send(challenge);
+  }
+
+  if (!mode && !token && !challenge) {
+    return res.status(200).json({
+      ok: true,
+      provider: "apollo",
+      message: "Webhook ativo"
+    });
+  }
+
+  return res.status(403).send("Forbidden");
 });
 app.post("/webhook", (req, res) => {
   if (!verifyApolloWebhook(req)) {
@@ -2254,6 +2364,15 @@ app.post("/webhook", (req, res) => {
     keys: Object.keys(req.body || {}).slice(0, 20)
   });
 
+  // Status assíncronos da Meta: sent, delivered, read e failed.
+  const metaStatuses = extractMetaStatuses(req.body);
+
+  if (metaStatuses.length) {
+    console.log("[webhook] status Meta interpretados", {
+      quantidade: metaStatuses.length
+    });
+    logMetaStatuses(metaStatuses);
+  }
 
   const messages = extractWebhookMessages(req.body);
 
@@ -2261,7 +2380,7 @@ app.post("/webhook", (req, res) => {
     quantidade: messages.length
   });
 
-  if (!messages.length) {
+  if (!messages.length && !metaStatuses.length) {
     console.log("[webhook] corpo não reconhecido", JSON.stringify(req.body).slice(0, 2500));
   }
 
@@ -2281,17 +2400,41 @@ app.post("/webhook", (req, res) => {
           });
         }
 
+        if (message.direction === "incoming" && message.from) {
+          const interactionAt = registerCustomerInteraction(
+            message.from,
+            message.timestamp
+          );
 
-        if (message.direction === "outgoing" || !message.from) return;
+          console.log("[window-24h] interação do cliente registrada", {
+            phone: normalizeBrazilianPhone(message.from),
+            interactionAt: interactionAt
+              ? new Date(interactionAt).toISOString()
+              : null,
+            expiresAt: interactionAt
+              ? new Date(interactionAt + CUSTOMER_SERVICE_WINDOW_MS).toISOString()
+              : null
+          });
+        }
 
-        // Toda mensagem recebida do cliente abre/renova a janela de atendimento de 24 horas.
-        // Isso acontece mesmo se a resposta automática estiver desligada ou bloqueada pelo cooldown.
-        registerCustomerInteraction(message.from, message.timestamp || Date.now());
+        if (message.direction === "outgoing" || !message.from || !botEnabled) return;
+        if (isHumanSupportRequest(message)) {
+          try {
+            await trackedSend(() =>
+              sendDecoratedMessage(message.from, HUMAN_SUPPORT_REPLY, message.id)
+            );
+          } catch (imageError) {
+            console.warn("[auto-reply] imagem falhou; enviando texto", {
+              phone: message.from,
+              error: imageError.message
+            });
+            await trackedSend(() =>
+              sendTextMessage(message.from, HUMAN_SUPPORT_REPLY, message.id)
+            );
+          }
+          return;
+        }
 
-        if (!botEnabled) return;
-
-        // ÚNICA resposta automática reativa: mensagem com o link do cardápio.
-        // Mantém a trava de 6 horas por cliente.
         const cooldown = autoReplyCooldownStatus(message.from);
 
         if (!cooldown.allowed) {
@@ -2303,27 +2446,46 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        // Não existe resposta de loja fechada neste fluxo.
-        // A única resposta automática permitida aqui é o link do cardápio.
-        const automaticReply = AUTO_REPLY_MESSAGE;
+        const storeOpen = isStoreOpenNow();
+        const automaticReply = storeOpen ? AUTO_REPLY_MESSAGE : CLOSED_REPLY_MESSAGE;
 
-        console.log("[auto-reply] enviando link automático", {
+        console.log("[auto-reply] respondendo cliente", {
           phone: message.from,
           type: message.type,
           messageId: message.id,
-          replyType: "link-cardapio",
+          storeMode: storeControlMode,
+          storeOpen,
+          replyType: storeOpen ? "boas-vindas" : "fechado",
           cooldownHours: 6
         });
 
-        await trackedSend(() =>
-          sendTextMessage(message.from, automaticReply, message.id)
-        );
+        try {
+          await trackedSend(() =>
+            sendDecoratedMessage(message.from, automaticReply, message.id)
+          );
 
-        registerAutoReplySent(message.from);
+          registerAutoReplySent(message.from);
 
-        console.log("[auto-reply] link enviado em texto", {
-          phone: message.from
-        });
+          console.log("[auto-reply] resposta com imagem enviada", {
+            phone: message.from
+          });
+        } catch (imageError) {
+          console.warn("[auto-reply] imagem falhou; enviando texto", {
+            phone: message.from,
+            error: imageError.message,
+            details: imageError.apollo || null
+          });
+
+          await trackedSend(() =>
+            sendTextMessage(message.from, automaticReply, message.id)
+          );
+
+          registerAutoReplySent(message.from);
+
+          console.log("[auto-reply] resposta em texto enviada", {
+            phone: message.from
+          });
+        }
       } catch (error) {
         console.error("[auto-reply] erro ao processar webhook Apollo:", {
           error: error.message,
@@ -2345,8 +2507,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor iniciado na porta ${PORT}`);
   console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
-  console.log("Resposta automática ativa: link do cardápio (máx. 1 vez a cada 6h por cliente)");
-  console.log("Mensagens automáticas de pedido/status: DESATIVADAS");
+  console.log(`Template PIX fora da janela: ${TEMPLATE_NAMES.pedido_pix}`);
+  console.log(`Template outros pagamentos fora da janela: ${TEMPLATE_NAMES.pedido_confirmado}`);
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
   console.log(`Apollo Send URL: ${APOLLO_SEND_URL ? "CONFIGURADA" : "NÃO CONFIGURADA"}`);
   console.log(`Apollo Auth Header: ${APOLLO_AUTH_HEADER || "x-api-key"}`);
@@ -2356,6 +2518,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Meta Access Token: ${META_ACCESS_TOKEN ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
   console.log(`Meta Phone Number ID: ${META_PHONE_NUMBER_ID ? "CONFIGURADO" : "NÃO CONFIGURADO"}`);
   console.log(`Graph API: ${GRAPH_API_VERSION}`);
-  console.log("Janela de 24 horas: registro mantido, sem disparos automáticos de pedido/status");
+  console.log("Janela de 24 horas: verificação preventiva ATIVA");
+  console.log("Dentro da janela: mensagem normal pelo Apollo");
+  console.log("Fora da janela: template via Apollo");
   console.log("Status Meta no webhook: ATIVO (sent/delivered/read/failed)");
 });
