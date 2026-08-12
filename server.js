@@ -73,6 +73,66 @@ const HUMAN_SUPPORT_REPLY = String(
 
 const SITE_URL = String(process.env.SITE_URL || "https://ki-pedidos.netlify.app/").trim();
 const AUTO_REPLY_MESSAGE = `📲 Faça seu pedido pelo nosso cardápio:\n${SITE_URL}`;
+
+const CLOSED_AUTO_REPLY_MESSAGE = `Olá! A Ki-Burguer está fechada no momento 🍔
+Confira nosso horário e envie sua mensagem novamente quando estivermos abertos.
+Cardápio: ${SITE_URL}`;
+
+// Controles individuais das mensagens automáticas.
+// Os padrões preservam o comportamento atual:
+// - link/saudação: ligado
+// - mensagem de fechado: desligada
+// - confirmação inicial fora de 24h: ligada
+// - mensagens de status: desligadas até serem ativadas na Central do Bot.
+const MESSAGE_CONTROL_DEFAULTS = Object.freeze({
+  greeting_link: true,
+  closed_message: false,
+  order_confirmed: true,
+  order_pix: true,
+  payment_confirmed: false,
+  order_preparing: false,
+  order_out_for_delivery: false,
+  order_delivered: false,
+  order_canceled: false
+});
+
+const messageControls = { ...MESSAGE_CONTROL_DEFAULTS };
+
+const MESSAGE_CONTROL_LABELS = Object.freeze({
+  greeting_link: "Saudação + link do cardápio",
+  closed_message: "Mensagem de loja fechada",
+  order_confirmed: "Pedido confirmado",
+  order_pix: "Pedido PIX / aguardando comprovante",
+  payment_confirmed: "Pagamento confirmado",
+  order_preparing: "Pedido em preparo",
+  order_out_for_delivery: "Saiu para entrega",
+  order_delivered: "Pedido entregue",
+  order_canceled: "Pedido cancelado"
+});
+
+function messageControlKeyForStatus(status) {
+  const normalized = normalizeOrderStatus(status);
+  if (["aguardando_comprovante", "pix_pendente"].includes(normalized)) return "order_pix";
+  if (normalized === "pagamento_confirmado") return "payment_confirmed";
+  if (["novo", "recebido", "pedido_recebido", "confirmado", "preparo", "em_preparo", "pronto", "preparo_concluido"].includes(normalized)) return "order_preparing";
+  if (["saiu_entrega", "saiu_para_entrega"].includes(normalized)) return "order_out_for_delivery";
+  if (["entregue", "concluido"].includes(normalized)) return "order_delivered";
+  if (normalized === "cancelado") return "order_canceled";
+  return "order_preparing";
+}
+
+function messageControlsSnapshot() {
+  return Object.fromEntries(
+    Object.keys(MESSAGE_CONTROL_DEFAULTS).map(key => [
+      key,
+      {
+        enabled: Boolean(messageControls[key]),
+        label: MESSAGE_CONTROL_LABELS[key] || key
+      }
+    ])
+  );
+}
+
 // Sincronizado pela dashboard: automatic, manual_open ou manual_closed.
 let storeControlMode = "automatic";
 
@@ -609,15 +669,9 @@ function templateTextParameter(value) {
 }
 
 function templateUsesImageHeader(templateName) {
+  // Imagem somente nas boas-vindas e na conclusão do pedido.
   return new Set([
     TEMPLATE_NAMES.novo_site,
-    TEMPLATE_NAMES.pedido_pix,
-    TEMPLATE_NAMES.pedido_confirmado,
-    TEMPLATE_NAMES.pedido_cancelado,
-    TEMPLATE_NAMES.pedido_em_preparo,
-    TEMPLATE_NAMES.pedido_pagamento_confirmado,
-    TEMPLATE_NAMES.pedido_status,
-    TEMPLATE_NAMES.pedido_saiu_entrega,
     TEMPLATE_NAMES.pedido_entregue
   ]).has(String(templateName || "").trim());
 }
@@ -1012,11 +1066,28 @@ function itemAddonsTotal(item) {
 }
 
 function itemBaseDisplayTotal(item) {
-  // O valor recebido do item pode vir com os adicionais já somados.
-  // Na mensagem automática, mostramos o produto e os adicionais separados.
+  // Exibe SOMENTE o valor base do produto.
+  // Os adicionais continuam listados separadamente e não entram no valor
+  // mostrado ao lado do nome do item.
+  const quantity = itemQuantity(item);
+  const unitBasePrice = itemUnitPrice(item);
+
+  // Quando o pedido informa o preço unitário, ele é a referência mais segura
+  // para o preço base do produto, mesmo que total/subtotal já venha com
+  // adicionais somados.
+  if (unitBasePrice > 0) {
+    return unitBasePrice * quantity;
+  }
+
+  // Fallback para estruturas que não enviam preço unitário.
   const fullItemTotal = itemTotal(item);
   const addonsTotal = itemAddonsTotal(item);
-  return Math.max(0, fullItemTotal - addonsTotal);
+
+  if (addonsTotal > 0 && fullItemTotal > addonsTotal) {
+    return Math.max(0, fullItemTotal - addonsTotal);
+  }
+
+  return Math.max(0, fullItemTotal);
 }
 
 function addonLabel(addon) {
@@ -2095,8 +2166,9 @@ app.get("/status", requireApiKey, (_req, res) => {
     received: botStats.received,
     startedAt: botStats.startedAt,
     provider: "apollo-link-plus-template-outside-24h",
-    autoReply: "link-cardapio",
-    cooldownHours: 6
+    autoReply: messageControls.greeting_link ? "link-cardapio" : "desativado",
+    cooldownHours: 6,
+    messageControls: messageControlsSnapshot()
   });
 });
 app.post("/toggle", requireApiKey, (req, res) => {
@@ -2104,6 +2176,43 @@ app.post("/toggle", requireApiKey, (req, res) => {
   botEnabled = req.body.enabled;
   res.json({ ok: true, enabled: botEnabled, message: botEnabled ? "Automação ligada." : "Automação desligada." });
 });
+
+app.get("/message-settings", requireApiKey, (_req, res) => {
+  res.json({
+    ok: true,
+    controls: messageControlsSnapshot()
+  });
+});
+
+app.post("/message-settings", requireApiKey, (req, res) => {
+  const key = String(req.body?.key || "").trim();
+  const enabled = req.body?.enabled;
+
+  if (!Object.prototype.hasOwnProperty.call(MESSAGE_CONTROL_DEFAULTS, key)) {
+    return res.status(400).json({ ok: false, error: "Tipo de mensagem inválido." });
+  }
+
+  if (typeof enabled !== "boolean") {
+    return res.status(400).json({ ok: false, error: 'Envie {"key":"...", "enabled":true|false}.' });
+  }
+
+  messageControls[key] = enabled;
+
+  console.log("[message-settings] atualizado", {
+    key,
+    label: MESSAGE_CONTROL_LABELS[key] || key,
+    enabled
+  });
+
+  res.json({
+    ok: true,
+    key,
+    enabled,
+    controls: messageControlsSnapshot(),
+    message: `${MESSAGE_CONTROL_LABELS[key] || key}: ${enabled ? "ATIVADA" : "DESATIVADA"}.`
+  });
+});
+
 
 app.get("/store-control", requireApiKey, (_req, res) => {
   res.json({ ok: true, mode: storeControlMode, open: isStoreOpenNow() });
@@ -2152,6 +2261,25 @@ app.post("/order-created", requireApiKey, async (req, res) => {
       });
     }
 
+    const orderMessageKey = isPixPayment(order) ? "order_pix" : "order_confirmed";
+
+    if (!messageControls[orderMessageKey]) {
+      console.log("[order-created] mensagem desativada na Central do Bot", {
+        order: orderNumber(order),
+        phone,
+        messageKey: orderMessageKey
+      });
+
+      return res.json({
+        ok: true,
+        skipped: true,
+        reason: "message-disabled",
+        messageKey: orderMessageKey,
+        windowOpen: false,
+        phone
+      });
+    }
+
     const selected = initialOrderTemplate(order);
 
     console.log("[order-created] fora da janela de 24h; enviando template", {
@@ -2189,19 +2317,72 @@ app.post("/order-created", requireApiKey, async (req, res) => {
   }
 });
 app.post("/send-status", requireApiKey, async (req, res) => {
-  // Atualizações automáticas de status estão temporariamente desativadas.
-  // Retorna OK para preservar compatibilidade com a dashboard.
   const order = req.body?.order || {};
   const status = req.body?.status;
-  console.log("[send-status] envio automático de status desativado", {
-    order: orderNumber(order),
-    status: normalizeOrderStatus(status)
-  });
-  return res.json({
-    ok: true,
-    skipped: true,
-    reason: "status-messages-disabled"
-  });
+
+  try {
+    if (!botEnabled) {
+      return res.json({ ok: true, skipped: true, reason: "automation-disabled" });
+    }
+
+    const key = messageControlKeyForStatus(status);
+
+    if (!messageControls[key]) {
+      console.log("[send-status] mensagem desativada na Central do Bot", {
+        order: orderNumber(order),
+        status: normalizeOrderStatus(status),
+        messageKey: key
+      });
+
+      return res.json({
+        ok: true,
+        skipped: true,
+        reason: "message-disabled",
+        messageKey: key
+      });
+    }
+
+    const phone = normalizeBrazilianPhone(orderPhone(order));
+    const windowStatus = customerServiceWindowStatus(phone);
+
+    if (windowStatus.open) {
+      const result = await trackedSend(() =>
+        sendTextMessage(phone, statusTextMessage(order, status))
+      );
+
+      return res.json({
+        ok: true,
+        mode: "text-inside-24h",
+        messageKey: key,
+        phone,
+        messageId: responseMessageId(result)
+      });
+    }
+
+    const sent = await trackedSend(() => sendOrderTemplate(order, status));
+
+    return res.json({
+      ok: true,
+      mode: "template-outside-24h",
+      messageKey: key,
+      phone,
+      template: sent.template,
+      messageId: responseMessageId(sent.result)
+    });
+  } catch (error) {
+    console.error("[send-status] falha", {
+      order: orderNumber(order),
+      status: normalizeOrderStatus(status),
+      error: error.message,
+      details: error.meta || error.apollo || null
+    });
+
+    return res.status(error.status || 500).json({
+      ok: false,
+      error: error.message,
+      details: error.meta || error.apollo || null
+    });
+  }
 });
 app.post("/send", requireApiKey, (_req, res) => {
   return res.status(410).json({ ok: false, disabled: true, reason: "reactive-link-only" });
@@ -2303,15 +2484,33 @@ app.post("/webhook", (req, res) => {
           return;
         }
 
-        // Não existe resposta de loja fechada neste fluxo.
-        // A única resposta automática permitida aqui é o link do cardápio.
-        const automaticReply = AUTO_REPLY_MESSAGE;
+        const storeOpen = isStoreOpenNow();
+        let automaticReply = null;
+        let replyType = null;
 
-        console.log("[auto-reply] enviando link automático", {
+        if (!storeOpen && messageControls.closed_message) {
+          automaticReply = CLOSED_AUTO_REPLY_MESSAGE;
+          replyType = "closed-message";
+        } else if (messageControls.greeting_link) {
+          automaticReply = AUTO_REPLY_MESSAGE;
+          replyType = "greeting-link";
+        }
+
+        if (!automaticReply) {
+          console.log("[auto-reply] nenhuma resposta automática habilitada", {
+            phone: message.from,
+            storeOpen,
+            greetingLink: messageControls.greeting_link,
+            closedMessage: messageControls.closed_message
+          });
+          return;
+        }
+
+        console.log("[auto-reply] enviando resposta automática", {
           phone: message.from,
           type: message.type,
           messageId: message.id,
-          replyType: "link-cardapio",
+          replyType,
           cooldownHours: 6
         });
 
@@ -2321,8 +2520,9 @@ app.post("/webhook", (req, res) => {
 
         registerAutoReplySent(message.from);
 
-        console.log("[auto-reply] link enviado em texto", {
-          phone: message.from
+        console.log("[auto-reply] resposta enviada", {
+          phone: message.from,
+          replyType
         });
       } catch (error) {
         console.error("[auto-reply] erro ao processar webhook Apollo:", {
@@ -2345,8 +2545,8 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`Servidor iniciado na porta ${PORT}`);
   console.log(`Webhook para cadastrar no Apollo: /webhook`);
   console.log(`Automação: ${botEnabled ? "LIGADA" : "DESLIGADA"}`);
-  console.log("Resposta automática ativa: link do cardápio (máx. 1 vez a cada 6h por cliente)");
-  console.log("Mensagens automáticas de pedido/status: DESATIVADAS");
+  console.log(`Saudação/link: ${messageControls.greeting_link ? "ATIVADA" : "DESATIVADA"}; fechado: ${messageControls.closed_message ? "ATIVADA" : "DESATIVADA"}`);
+  console.log("Mensagens automáticas individuais: controladas pela Central do Bot");
   console.log(`Modo do payload: ${APOLLO_PAYLOAD_MODE}`);
   console.log(`Apollo Send URL: ${APOLLO_SEND_URL ? "CONFIGURADA" : "NÃO CONFIGURADA"}`);
   console.log(`Apollo Auth Header: ${APOLLO_AUTH_HEADER || "x-api-key"}`);
