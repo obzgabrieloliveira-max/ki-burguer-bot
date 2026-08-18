@@ -686,6 +686,8 @@ function templateUsesImageHeader(templateName) {
   // Imagem somente nas boas-vindas e na conclusão do pedido.
   return new Set([
     TEMPLATE_NAMES.novo_site,
+    TEMPLATE_NAMES.pedido_pix,
+    TEMPLATE_NAMES.pedido_confirmado,
     TEMPLATE_NAMES.pedido_entregue
   ]).has(String(templateName || "").trim());
 }
