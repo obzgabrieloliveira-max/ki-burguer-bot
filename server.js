@@ -2497,6 +2497,18 @@ app.post("/webhook", (req, res) => {
 
         if (!botEnabled) return;
 
+        // Comprovantes PIX e outras mídias não disparam saudação automática.
+        // A mensagem continua registrada e renova a janela de 24h, mas o bot fica em silêncio.
+        const silentMediaTypes = new Set(["image", "document"]);
+        if (silentMediaTypes.has(String(message.type || "").toLowerCase())) {
+          console.log("[auto-reply] mídia recebida sem saudação automática", {
+            phone: normalizeBrazilianPhone(message.from),
+            type: message.type,
+            messageId: message.id
+          });
+          return;
+        }
+
         // ÚNICA resposta automática reativa: mensagem com o link do cardápio.
         // Mantém a trava de 6 horas por cliente.
         const cooldown = autoReplyCooldownStatus(message.from);
