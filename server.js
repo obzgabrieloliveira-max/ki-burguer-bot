@@ -1486,11 +1486,10 @@ function initialOrderTemplate(order) {
       parameters: [
         orderName(order),
         orderNumber(order),
-        formatBRL(
-          combinedPaymentHasPix(order) && combinedPixAmount(order) > 0
-            ? combinedPixAmount(order)
-            : orderTotals(order).total
-        )
+        (combinedPaymentHasPix(order) && combinedPixAmount(order) > 0
+          ? combinedPixAmount(order)
+          : orderTotals(order).total
+        ).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
       ]
     };
   }
